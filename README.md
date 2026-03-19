@@ -9,10 +9,9 @@ cd dota-1-model && python -m http.server 8000
 open http://localhost:8000
 ```
 
-### Review Models
+Review Models
 
-
-
+![model-animation-20260320-011854.gif](docs/model-animation-20260320-011854.gif)
 
 ## Project Structure
 
