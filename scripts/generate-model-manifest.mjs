@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 /**
  * Scan WarcraftModels/ for *.mdx files
- * Convert each MDX to GLB for browser viewing (with BLP textures and UVs)
+ * Convert each MDX to GLB for browser viewing (with BLP textures, UVs, skeleton, and animations)
  * Write manifest.json with model list
  */
 import fs from 'fs';
 import path from 'path';
+import { mat4 } from 'gl-matrix';
 import { parseMDX, decodeBLP, getBLPImageData } from 'war3-model';
 import UPNG from 'upng-js';
+
+const WC3_FRAME_RATE = 1000; // MDX frames are typically in millisecs; 1000 frames = 1 sec
 
 const MODEL_DIR = path.join(process.cwd(), 'WarcraftModels');
 const OUTPUT_DIR = path.join(process.cwd(), 'models');
@@ -161,6 +164,7 @@ function convertToGLB(model, modelDir) {
     const textures = model.Textures || [];
     const materials = model.Materials || [];
     const geosets = model.Geosets || [];
+    const bones = model.Bones || [];
 
     const primitives = [];
     const accessors = [];
@@ -299,6 +303,7 @@ function convertToGLB(model, modelDir) {
         );
 
         const nAcc = accessors.length;
+        const primAttrs = { POSITION: nAcc, NORMAL: nAcc + 1, TEXCOORD_0: nAcc + 2 };
         accessors.push(
             { bufferView: nBV, componentType: 5126, count: vCount, type: 'VEC3', min: posMin, max: posMax },
             { bufferView: nBV + 1, componentType: 5126, count: vCount, type: 'VEC3' },
@@ -306,8 +311,40 @@ function convertToGLB(model, modelDir) {
             { bufferView: nBV + 3, componentType: 5123, count: indices.length, type: 'SCALAR' }
         );
 
+        if (bones.length > 0 && geoset.VertexGroup && geoset.VertexGroup.length >= vCount) {
+            const jointsBuf = Buffer.alloc(vCount * 4);
+            const weightsBuf = Buffer.alloc(vCount * 4 * 4);
+            for (let i = 0; i < vCount; i++) {
+                const j = Math.min(geoset.VertexGroup[i], bones.length - 1);
+                jointsBuf.writeUInt8(j, i * 4);
+                jointsBuf.writeUInt8(0, i * 4 + 1);
+                jointsBuf.writeUInt8(0, i * 4 + 2);
+                jointsBuf.writeUInt8(0, i * 4 + 3);
+                weightsBuf.writeFloatLE(1, i * 16);
+                weightsBuf.writeFloatLE(0, i * 16 + 4);
+                weightsBuf.writeFloatLE(0, i * 16 + 8);
+                weightsBuf.writeFloatLE(0, i * 16 + 12);
+            }
+            const jOffset = bufferOffset;
+            bufferChunks.push(jointsBuf);
+            bufferOffset += jointsBuf.length;
+            const wOffset = bufferOffset;
+            bufferChunks.push(weightsBuf);
+            bufferOffset += weightsBuf.length;
+            bufferViews.push(
+                { buffer: 0, byteOffset: jOffset, byteLength: jointsBuf.length, target: 34962 },
+                { buffer: 0, byteOffset: wOffset, byteLength: weightsBuf.length, target: 34962 }
+            );
+            primAttrs.JOINTS_0 = accessors.length;
+            primAttrs.WEIGHTS_0 = accessors.length + 1;
+            accessors.push(
+                { bufferView: bufferViews.length - 2, componentType: 5121, count: vCount, type: 'VEC4', normalized: true },
+                { bufferView: bufferViews.length - 1, componentType: 5126, count: vCount, type: 'VEC4' }
+            );
+        }
+
         primitives.push({
-            attributes: { POSITION: nAcc, NORMAL: nAcc + 1, TEXCOORD_0: nAcc + 2 },
+            attributes: primAttrs,
             indices: nAcc + 3,
             material: matIndex
         });
@@ -317,13 +354,227 @@ function convertToGLB(model, modelDir) {
         throw new Error('No geometry');
     }
 
+    const sequences = model.Sequences || [];
+    const pivotPoints = model.PivotPoints || [];
+    let gltfNodes = [];
+    let gltfSkins = [];
+    let gltfAnimations = [];
+    let meshNodeIndex = 0;
+
+    if (bones.length > 0) {
+        const objectIdToIndex = new Map();
+        bones.forEach((b, i) => { if (b.ObjectId != null) objectIdToIndex.set(b.ObjectId, i); });
+        const nodeChildren = Array.from({ length: bones.length }, () => []);
+        bones.forEach((b, i) => {
+            const parentId = b.Parent;
+            if (parentId != null && parentId >= 0) {
+                const pIdx = objectIdToIndex.get(parentId);
+                if (pIdx != null) nodeChildren[pIdx].push(i);
+            }
+        });
+
+        for (let i = 0; i < bones.length; i++) {
+            const b = bones[i];
+            const pivot = pivotPoints[b.ObjectId] || b.PivotPoint || new Float32Array([0, 0, 0]);
+            const node = {
+                name: b.Name || `Bone_${i}`,
+                translation: [pivot[0], pivot[1], pivot[2]],
+                rotation: [0, 0, 0, 1],
+                scale: [1, 1, 1]
+            };
+            if (nodeChildren[i].length > 0) node.children = nodeChildren[i];
+            gltfNodes.push(node);
+        }
+
+        const worldMats = bones.map(() => mat4.create());
+        const invBind = bones.map(() => mat4.create());
+        const order = [];
+        const visited = new Set();
+        function visit(i) {
+            if (visited.has(i)) return;
+            visited.add(i);
+            const pIdx = bones[i].Parent != null && bones[i].Parent >= 0 ? objectIdToIndex.get(bones[i].Parent) : null;
+            if (pIdx != null) visit(pIdx);
+            order.push(i);
+        }
+        for (let i = 0; i < bones.length; i++) visit(i);
+        for (const i of order) {
+            const b = bones[i];
+            const pivot = pivotPoints[b.ObjectId] || b.PivotPoint || new Float32Array([0, 0, 0]);
+            mat4.identity(worldMats[i]);
+            mat4.translate(worldMats[i], worldMats[i], [pivot[0], pivot[1], pivot[2]]);
+            const pIdx = b.Parent != null && b.Parent >= 0 ? objectIdToIndex.get(b.Parent) : null;
+            if (pIdx != null) mat4.multiply(worldMats[i], worldMats[pIdx], worldMats[i]);
+            mat4.invert(invBind[i], worldMats[i]);
+        }
+
+        const invBindFloats = new Float32Array(bones.length * 16);
+        invBind.forEach((m, i) => { m.forEach((v, j) => { invBindFloats[i * 16 + j] = v; }); });
+        const invBindBuf = Buffer.from(invBindFloats.buffer, invBindFloats.byteOffset, invBindFloats.byteLength);
+        const ibOffset = bufferOffset;
+        bufferChunks.push(invBindBuf);
+        bufferOffset += invBindBuf.length;
+        bufferViews.push({ buffer: 0, byteOffset: ibOffset, byteLength: invBindBuf.length, target: 34962 });
+        accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: bones.length, type: 'MAT4' });
+        gltfSkins.push({ joints: bones.map((_, i) => i), inverseBindMatrices: accessors.length - 1 });
+
+        meshNodeIndex = bones.length;
+        gltfNodes.push({ name: model.Info?.Name || 'Model', mesh: 0, skin: 0 });
+    } else {
+        gltfNodes = [{ name: model.Info?.Name || 'Model', mesh: 0 }];
+    }
+
+    if (bones.length > 0 && sequences.length > 0) {
+        let accBase = accessors.length;
+
+        for (let seqIdx = 0; seqIdx < sequences.length; seqIdx++) {
+            const seq = sequences[seqIdx];
+            const interval = seq.Interval;
+            const startFrame = interval ? interval[0] : 0;
+            const endFrame = interval ? interval[1] : 1000;
+            if (endFrame <= startFrame) continue;
+
+            const timeSet = new Set();
+            const transByNode = new Map();
+            const rotByNode = new Map();
+            const scaleByNode = new Map();
+
+            for (let bi = 0; bi < bones.length; bi++) {
+                const b = bones[bi];
+                if (b.Translation && b.Translation.Keys) {
+                    b.Translation.Keys.forEach(k => {
+                        if (k.Frame >= startFrame && k.Frame <= endFrame) {
+                            timeSet.add((k.Frame - startFrame) / WC3_FRAME_RATE);
+                            if (!transByNode.has(bi)) transByNode.set(bi, []);
+                            transByNode.get(bi).push({ t: (k.Frame - startFrame) / WC3_FRAME_RATE, v: k.Vector });
+                        }
+                    });
+                }
+                if (b.Rotation && b.Rotation.Keys) {
+                    b.Rotation.Keys.forEach(k => {
+                        if (k.Frame >= startFrame && k.Frame <= endFrame) {
+                            timeSet.add((k.Frame - startFrame) / WC3_FRAME_RATE);
+                            if (!rotByNode.has(bi)) rotByNode.set(bi, []);
+                            rotByNode.get(bi).push({ t: (k.Frame - startFrame) / WC3_FRAME_RATE, v: k.Vector });
+                        }
+                    });
+                }
+                if (b.Scaling && b.Scaling.Keys) {
+                    b.Scaling.Keys.forEach(k => {
+                        if (k.Frame >= startFrame && k.Frame <= endFrame) {
+                            timeSet.add((k.Frame - startFrame) / WC3_FRAME_RATE);
+                            if (!scaleByNode.has(bi)) scaleByNode.set(bi, []);
+                            scaleByNode.get(bi).push({ t: (k.Frame - startFrame) / WC3_FRAME_RATE, v: k.Vector });
+                        }
+                    });
+                }
+            }
+
+            const times = Array.from(timeSet).sort((a, b) => a - b);
+            if (times.length === 0) continue;
+
+            const timeBuf = Buffer.alloc(times.length * 4);
+            times.forEach((t, i) => timeBuf.writeFloatLE(t, i * 4));
+            const tOff = bufferOffset;
+            bufferChunks.push(timeBuf);
+            bufferOffset += timeBuf.length;
+            bufferViews.push({ buffer: 0, byteOffset: tOff, byteLength: timeBuf.length, target: 34962 });
+            const timeAcc = accBase++;
+            accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: times.length, type: 'SCALAR' });
+
+            const seqChannels = [];
+            const seqSamplers = [];
+
+            transByNode.forEach((keys, nodeIndex) => {
+                keys.sort((a, b) => a.t - b.t);
+                const vals = new Float32Array(times.length * 3);
+                for (let i = 0; i < times.length; i++) {
+                    const t = times[i];
+                    let k0 = keys[0], k1 = keys[keys.length - 1];
+                    for (let j = 0; j < keys.length - 1; j++) {
+                        if (keys[j].t <= t && keys[j + 1].t >= t) {
+                            k0 = keys[j];
+                            k1 = keys[j + 1];
+                            break;
+                        }
+                    }
+                    const u = k1.t > k0.t ? (t - k0.t) / (k1.t - k0.t) : 0;
+                    for (let c = 0; c < 3; c++) vals[i * 3 + c] = k0.v[c] + u * (k1.v[c] - k0.v[c]);
+                }
+                const buf = Buffer.from(vals.buffer, vals.byteOffset, vals.byteLength);
+                const vo = bufferOffset;
+                bufferChunks.push(buf);
+                bufferOffset += buf.length;
+                bufferViews.push({ buffer: 0, byteOffset: vo, byteLength: buf.length, target: 34962 });
+                accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: times.length, type: 'VEC3' });
+                seqSamplers.push({ input: timeAcc, output: accBase - 1, interpolation: 'LINEAR' });
+                seqChannels.push({ sampler: seqSamplers.length - 1, target: { node: nodeIndex, path: 'translation' } });
+            });
+            rotByNode.forEach((keys, nodeIndex) => {
+                keys.sort((a, b) => a.t - b.t);
+                const vals = new Float32Array(times.length * 4);
+                for (let i = 0; i < times.length; i++) {
+                    const t = times[i];
+                    let k0 = keys[0], k1 = keys[keys.length - 1];
+                    for (let j = 0; j < keys.length - 1; j++) {
+                        if (keys[j].t <= t && keys[j + 1].t >= t) {
+                            k0 = keys[j];
+                            k1 = keys[j + 1];
+                            break;
+                        }
+                    }
+                    const u = k1.t > k0.t ? (t - k0.t) / (k1.t - k0.t) : 0;
+                    for (let c = 0; c < 4; c++) vals[i * 4 + c] = k0.v[c] + u * (k1.v[c] - k0.v[c]);
+                }
+                const buf = Buffer.from(vals.buffer, vals.byteOffset, vals.byteLength);
+                const vo = bufferOffset;
+                bufferChunks.push(buf);
+                bufferOffset += buf.length;
+                bufferViews.push({ buffer: 0, byteOffset: vo, byteLength: buf.length, target: 34962 });
+                accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: times.length, type: 'VEC4' });
+                seqSamplers.push({ input: timeAcc, output: accBase - 1, interpolation: 'LINEAR' });
+                seqChannels.push({ sampler: seqSamplers.length - 1, target: { node: nodeIndex, path: 'rotation' } });
+            });
+            scaleByNode.forEach((keys, nodeIndex) => {
+                keys.sort((a, b) => a.t - b.t);
+                const vals = new Float32Array(times.length * 3);
+                for (let i = 0; i < times.length; i++) {
+                    const t = times[i];
+                    let k0 = keys[0], k1 = keys[keys.length - 1];
+                    for (let j = 0; j < keys.length - 1; j++) {
+                        if (keys[j].t <= t && keys[j + 1].t >= t) {
+                            k0 = keys[j];
+                            k1 = keys[j + 1];
+                            break;
+                        }
+                    }
+                    const u = k1.t > k0.t ? (t - k0.t) / (k1.t - k0.t) : 0;
+                    for (let c = 0; c < 3; c++) vals[i * 3 + c] = k0.v[c] + u * (k1.v[c] - k0.v[c]);
+                }
+                const buf = Buffer.from(vals.buffer, vals.byteOffset, vals.byteLength);
+                const vo = bufferOffset;
+                bufferChunks.push(buf);
+                bufferOffset += buf.length;
+                bufferViews.push({ buffer: 0, byteOffset: vo, byteLength: buf.length, target: 34962 });
+                accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: times.length, type: 'VEC3' });
+                seqSamplers.push({ input: timeAcc, output: accBase - 1, interpolation: 'LINEAR' });
+                seqChannels.push({ sampler: seqSamplers.length - 1, target: { node: nodeIndex, path: 'scale' } });
+            });
+
+            if (seqChannels.length === 0) continue;
+            const name = (seq.Name || `Sequence_${seqIdx}`).replace(/\s*-\s*\d+$/, '').trim();
+            gltfAnimations.push({ name: name || `Anim_${seqIdx}`, channels: seqChannels, samplers: seqSamplers });
+        }
+    }
+
     const totalBuffer = Buffer.concat(bufferChunks);
 
+    const sceneNodes = bones.length > 0 ? [meshNodeIndex, ...bones.map((_, i) => i)] : [0];
     const gltf = {
-        asset: { version: '2.0', generator: 'MDXtoGLTF+BLP' },
+        asset: { version: '2.0', generator: 'MDXtoGLTF+BLP+Anim' },
         scene: 0,
-        scenes: [{ nodes: [0] }],
-        nodes: [{ name: model.Info?.Name || 'Model', mesh: 0 }],
+        scenes: [{ nodes: sceneNodes }],
+        nodes: gltfNodes,
         meshes: [{ name: model.Info?.Name || 'Model', primitives }],
         accessors,
         bufferViews,
@@ -331,7 +582,9 @@ function convertToGLB(model, modelDir) {
         materials: gltfMaterials,
         textures: gltfTextures,
         images: images,
-        samplers: images.length ? samplers : undefined
+        samplers: images.length ? samplers : undefined,
+        skins: gltfSkins.length ? gltfSkins : undefined,
+        animations: gltfAnimations.length ? gltfAnimations : undefined
     };
     if (!gltf.images.length) delete gltf.images;
     if (!gltf.samplers) delete gltf.samplers;

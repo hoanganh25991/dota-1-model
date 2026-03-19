@@ -95,6 +95,7 @@ scene.add(gridHelper);
 
 let currentModel = null;
 let mixer = null;
+let clipActions = new Map();
 let clock = new THREE.Clock();
 let animationSpeed = 1.0;
 let modelCache = new Map();
@@ -257,13 +258,29 @@ async function loadModel(modelInfo) {
     if (mixer) {
         mixer.stopAllAction();
         mixer = null;
+        clipActions.clear();
     }
 
     if (modelCache.has(modelInfo.name)) {
-        currentModel = modelCache.get(modelInfo.name).clone();
+        const cached = modelCache.get(modelInfo.name);
+        currentModel = cached.scene.clone();
         scene.add(currentModel);
         centerModel();
         setupAnimations();
+        if (cached.animations && cached.animations.length > 0) {
+            mixer = new THREE.AnimationMixer(currentModel);
+            clipActions.clear();
+            cached.animations.forEach((clip) => {
+                const action = mixer.clipAction(clip);
+                const isDeath = /^death$/i.test(clip.name);
+                action.setLoop(isDeath ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
+                action.clampWhenFinished = isDeath;
+                clipActions.set(clip.name, action);
+                clipActions.set(clip.name.toLowerCase(), action);
+            });
+            const stand = clipActions.get('stand') || clipActions.get('Stand') || clipActions.get(cached.animations[0].name);
+            if (stand) stand.play();
+        }
         return;
     }
 
@@ -277,10 +294,25 @@ async function loadModel(modelInfo) {
         currentModel = gltf.scene;
         scene.add(currentModel);
 
-        modelCache.set(modelInfo.name, currentModel.clone());
+        modelCache.set(modelInfo.name, { scene: currentModel.clone(), animations: gltf.animations || [] });
 
         centerModel();
         setupAnimations();
+
+        if (gltf.animations && gltf.animations.length > 0) {
+            mixer = new THREE.AnimationMixer(currentModel);
+            clipActions.clear();
+            gltf.animations.forEach((clip) => {
+                const action = mixer.clipAction(clip);
+                const isDeath = /^death$/i.test(clip.name);
+                action.setLoop(isDeath ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
+                action.clampWhenFinished = isDeath;
+                clipActions.set(clip.name, action);
+                clipActions.set(clip.name.toLowerCase(), action);
+            });
+            const stand = clipActions.get('stand') || clipActions.get('Stand') || clipActions.get(gltf.animations[0].name);
+            if (stand) stand.play();
+        }
 
         loadingEl.classList.add('hidden');
     } catch (error) {
@@ -334,6 +366,22 @@ function playAnimation(animName) {
     document.querySelectorAll('.animation-btn').forEach(btn => {
         btn.classList.toggle('active', btn.textContent === animName);
     });
+    if (!mixer || !clipActions.size) return;
+    mixer.stopAllAction();
+    const key = animName.toLowerCase();
+    let action = clipActions.get(key);
+    if (!action) {
+        for (const [name, a] of clipActions) {
+            if (name.toLowerCase().startsWith(key) || name.toLowerCase().includes(key)) {
+                action = a;
+                break;
+            }
+        }
+    }
+    if (action) {
+        action.timeScale = animationSpeed;
+        action.play();
+    }
 }
 
 function setupControls() {
@@ -403,39 +451,11 @@ function setupControls() {
 
 function animate() {
     requestAnimationFrame(animate);
-
-    if (currentModel) {
-        const activeBtn = document.querySelector('.animation-btn.active');
-        const animName = activeBtn ? activeBtn.textContent : 'Stand';
-        const time = Date.now() * 0.001 * animationSpeed;
-
-        currentModel.traverse(child => {
-            if (child.isMesh) {
-                switch (animName) {
-                    case 'Stand':
-                        child.position.y = Math.sin(time * 2) * 0.02;
-                        child.rotation.y = Math.sin(time * 0.5) * 0.1;
-                        break;
-                    case 'Walk':
-                        child.position.y = Math.abs(Math.sin(time * 8)) * 0.05;
-                        child.rotation.y = Math.sin(time * 4) * 0.15;
-                        break;
-                    case 'Attack':
-                        child.rotation.x = Math.sin(time * 10) * 0.5;
-                        break;
-                    case 'Spell':
-                        child.position.y = Math.sin(time * 5) * 0.1;
-                        child.rotation.z = Math.sin(time * 3) * 0.2;
-                        break;
-                    case 'Death':
-                        child.rotation.x = Math.PI / 2 * Math.min(1, (time % 5) / 2);
-                        child.position.y = -0.5 + Math.max(0, ((time % 5) - 2)) * 0.1;
-                        break;
-                }
-            }
-        });
+    const delta = clock.getDelta();
+    if (mixer) {
+        mixer.timeScale = animationSpeed;
+        mixer.update(delta);
     }
-
     controls.update();
     renderer.render(scene, camera);
 }
