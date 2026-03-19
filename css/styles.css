@@ -68,7 +68,11 @@ body {
     text-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
 }
 
-.title-break-mobile {
+.title-desktop {
+    display: inline;
+}
+
+.title-mobile {
     display: none;
 }
 
@@ -417,8 +421,12 @@ input[type="range"] {
         z-index: 10;
     }
 
-    .title-break-mobile {
-        display: inline;
+    .title-desktop {
+        display: none;
+    }
+
+    .title-mobile {
+        display: block;
     }
 
     #sidebar {
@@ -466,6 +474,13 @@ input[type="range"] {
     #lighting-select,
     #animation-select {
         display: block;
+        appearance: auto;
+        -webkit-appearance: menulist;
+    }
+
+    #category-filter select {
+        appearance: auto;
+        -webkit-appearance: menulist;
     }
 
     /* Better info positioning for stacked layout */

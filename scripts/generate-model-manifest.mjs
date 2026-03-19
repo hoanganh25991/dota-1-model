@@ -295,7 +295,7 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
 
     // Pick the first layer that actually resolves to a usable texture.
     // Some WC3 materials store the visible base texture in layer[1..], while layer[0]
-    // is a replaceable texture (missing image) -> would render as white otherwise.
+    // can be a replaceable texture (missing Image) -> would render as white otherwise.
     let tex = null;
     let selectedLayer = null;
     let alpha = 1;
@@ -308,9 +308,9 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
       const texEntry = model.Textures?.[texId];
 
       let texPath = texEntry?.Image && String(texEntry.Image).trim();
-      if (!texPath && texEntry?.ReplaceableId > 0) {
-        texPath = findFallbackTextureImage(model);
-      }
+      // If it's replaceable (missing Image), skip it. Otherwise we'd "invent" a
+      // texture and produce large white artifacts for effects/overlays.
+      if (!texPath && texEntry?.ReplaceableId > 0) continue;
 
       if (!texPath) continue;
 
@@ -337,7 +337,10 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
       break;
     }
 
-    const alphaClamped = Math.max(0, Math.min(1, alpha));
+    let alphaClamped = Math.max(0, Math.min(1, alpha));
+    // If we couldn't resolve a real texture, hide the geometry instead of rendering
+    // a white/opaque fallback.
+    if (!tex) alphaClamped = 0;
     const pbr = doc.createMaterial().setBaseColorFactor([1, 1, 1, alphaClamped]);
     if (tex) pbr.setBaseColorTexture(tex);
     if (doubleSided) pbr.setDoubleSided(true);

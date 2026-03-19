@@ -131,6 +131,16 @@ function loadManifest() {
         category: m.category || 'Unit',
         path: m.path || m.glb || `models/${(m.id || m.file || m.name).replace(/\.(mdx|glb)$/i, '')}.glb`,
       }));
+
+      // Keep model ordering stable and human-friendly: sort alphabetically by display name.
+      // This ensures that within each Type/category, the list and the model <select> are sorted by name.
+      allModels.sort((a, b) => {
+        const an = (a.name || '').toLowerCase();
+        const bn = (b.name || '').toLowerCase();
+        const cmp = an.localeCompare(bn, undefined, { sensitivity: 'base' });
+        return cmp !== 0 ? cmp : String(a.id).localeCompare(String(b.id), undefined, { sensitivity: 'base' });
+      });
+
       return allModels;
     });
 }
