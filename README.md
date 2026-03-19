@@ -83,4 +83,10 @@ Names are formatted for readability:
 | Spirit    | Ghosts and spirits            |
 | Cinematic | Camera and cinematic models   |
 
+## License
 
+Copyright © 2025 Monk Journey Team. All Rights Reserved.
+
+This project is proprietary and confidential. Unauthorized reproduction, distribution, or disclosure is prohibited. No license, express or implied, to any intellectual property rights is granted by this document.
+
+See the [LICENSE](LICENSE) file for full details.
