@@ -76,6 +76,11 @@ body {
     display: none;
 }
 
+.title-mobile-line1,
+.title-mobile-line2 {
+    white-space: normal;
+}
+
 #model-count {
     font-size: 12px;
     color: #666;
@@ -406,7 +411,7 @@ input[type="range"] {
     }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 768px) {
     body {
         overflow: auto;
     }
@@ -416,17 +421,24 @@ input[type="range"] {
         top: auto;
         left: auto;
         right: auto;
-        padding: 16px 18px 10px;
+        padding: 12px 14px 8px;
         pointer-events: none;
         z-index: 10;
     }
 
     .title-desktop {
-        display: none;
+        display: block;
+        white-space: nowrap;
     }
 
     .title-mobile {
-        display: block;
+        display: none;
+    }
+
+    #header h1 {
+        font-size: 18px;
+        letter-spacing: 1.6px;
+        line-height: 1.1;
     }
 
     #sidebar {
@@ -448,15 +460,18 @@ input[type="range"] {
     }
 
     #controls {
-        position: relative;
+        position: sticky;
         width: 100%;
         height: auto;
         right: auto;
-        top: auto;
-        overflow-y: visible;
+        top: 0;
+        bottom: auto;
+        overflow-y: auto;
+        max-height: 55vh;
         padding: 16px 18px;
         border-left: none;
         border-top: 1px solid rgba(0, 255, 136, 0.2);
+        z-index: 250;
     }
 
     #model-list {
