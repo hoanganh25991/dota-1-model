@@ -148,7 +148,9 @@ Steps:
 7. On any throw/decode failure: returns `null` (that layer is not usable)
 
 ### Non-BLP images
-If an MDX layer references `.png` / `.jpg` / `.jpeg`, the script reads file bytes with `fs.readFileSync` and assigns `imgHasAlpha = false` for cache purposes (alpha mode then follows `alphaClamped` only, unless BLP path set `hasAlpha`).
+If an MDX layer references `.jpg` / `.jpeg`, the script reads file bytes with `fs.readFileSync` and assumes `imgHasAlpha = false`.
+
+If an MDX layer references `.png`, the script reads file bytes and decodes the PNG (via `upng-js`) to detect whether it contains “enough” transparent pixels, so `alphaMode` can become `MASK` when appropriate.
 
 ## Material export
 
@@ -166,7 +168,8 @@ For each `model.Materials[]` entry:
    - `resolved = resolveTexturePath(modelDir, texPath)` — if null, continue
    - By extension:
      - `.blp` → `blpToPngBytes(resolved)`; if null, continue
-     - `.png`/`.jpg`/`.jpeg` → read bytes; `imgHasAlpha` stays false for cache
+    - `.png` → read bytes; detect `imgHasAlpha` from PNG transparency for cache
+    - `.jpg`/`.jpeg` → read bytes; `imgHasAlpha` stays false for cache
    - **Texture cache:** key = resolved filesystem path string. Value = `{ texture, hasAlpha }`. Reuse if key already present.
    - Set `tex`, `textureHasAlpha`, `selectedLayer`, and `alpha` from the chosen layer; **break** (first winning layer wins)
 
@@ -211,7 +214,9 @@ Then for any material where `tex` is still null:
 
 ### What ends up inside the GLB (textures)
 - **No `.blp` binaries** are embedded: the converter decodes BLP to RGBA, encodes **PNG**, and stores that in the glTF buffer.
-- The script always calls `setMimeType('image/png')` on `createTexture()` (including when `imgBytes` came from reading a `.png`/`.jpg`/`.jpeg` file). A stricter reimplementation should set `image/jpeg` / `image/png` from the file extension.
+- The script sets the GLTF texture MIME type based on the resolved source:
+  - `.blp` and `.png` → `image/png`
+  - `.jpg`/`.jpeg` → `image/jpeg`
 - **Texture deduplication:** the same resolved path only decodes once; subsequent materials reuse the cached glTF `Texture`.
 
 ## Geometry and skinning export
@@ -225,10 +230,7 @@ The script uses `collectNodes(model)` to build a deterministic node order:
 
 For each node:
 - Create a glTF node with name `node.Name` or `Node_<i>`
-- Initialize bind pose transforms:
-  - translation: `[0,0,0]`
-  - rotation: `[0,0,0,1]`
-  - scale: `[1,1,1]`
+- Initialize bind pose transforms from WC3 `Translation`/`Rotation`/`Scaling` at the earliest keyframe (bind pose), including WC3 pivot correction via `wc3TrsToGltf(...)`.
 
 ### Mesh primitive per geoset
 For each `model.Geosets[]` entry `g`:
@@ -259,6 +261,8 @@ Each geoset becomes a glTF node:
 If `collected.length > 0`:
 - Create a skin
 - Add all joints (`skin.addJoint(gltfNodes[i])`)
+- Set `skin.skeleton` to the closest common ancestor of joints
+- Compute and export `skin.inverseBindMatrices` from bind-pose global joint transforms (required for correct Three.js skinning)
 
 Vertex group to joints/weights:
 - `buildSkinData(geoset, boneIndexMap)`
@@ -296,11 +300,13 @@ Important choice:
 For each glTF node (bone/helper) and each frame f:
 - Sample:
   - Translation:
-    - `sampleAnimVector(node.Translation, f, startFrame, endFrame) ?? [0,0,0]`
+    - `sampleAnimVector(node.Translation, f, startFrame, endFrame) ?? bindPoseTranslation`
   - Rotation:
-    - `sampleAnimVector(node.Rotation, f, startFrame, endFrame) ?? [0,0,0,1]`
+    - `sampleAnimVector(node.Rotation, f, startFrame, endFrame) ?? bindPoseRotation`
   - Scaling:
-    - `sampleAnimVector(node.Scaling, f, startFrame, endFrame) ?? [1,1,1]`
+    - `sampleAnimVector(node.Scaling, f, startFrame, endFrame) ?? bindPoseScale`
+
+If a node has no keys inside a sequence interval, the exporter falls back to the node's bind pose transforms (not identity).
 
 The sampling rule:
 - `sampleAnimVector(anim, frame, seqStart, seqEnd)`:
@@ -309,6 +315,8 @@ The sampling rule:
   - if keys length is 1: return that vector
   - otherwise:
     - find surrounding keys and linearly interpolate each component
+
+For `anim.LineType === DontInterp` (line type `0`), the sampler uses step interpolation (previous key wins) instead of blending.
 
 ### WC3 -> glTF transform conversion
 The script uses node pivot:

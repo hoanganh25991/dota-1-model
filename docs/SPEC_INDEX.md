@@ -1,5 +1,7 @@
 # Spec Index (Re-implementation)
 
+**Goals and measurable targets** (performance, size, scope): [`input.md`](input.md)
+
 This folder contains the two main specs that describe this project end-to-end:
 
 1. MDX/BLP/animation extraction pipeline:
