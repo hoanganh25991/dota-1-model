@@ -118,7 +118,7 @@ function disposeObject3D(root) {
 }
 
 function fitCameraToObject(object3d, { padding = 1.25 } = {}) {
-    const box = new THREE.Box3().setFromObject(object3d);
+    const box = getBoundsSafe(object3d);
     if (!Number.isFinite(box.min.x) || box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
@@ -130,10 +130,13 @@ function fitCameraToObject(object3d, { padding = 1.25 } = {}) {
     distance *= padding;
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
     camera.position.copy(center).addScaledVector(dir, distance);
-    camera.near = Math.max(0.01, distance / 100);
-    camera.far = Math.max(100, distance * 100);
+    // Prevent near-plane clipping artifacts when orbiting close to skinned models.
+    camera.near = 0.001;
+    // Reduce far/near ratio to avoid depth precision artifacts.
+    camera.far = Math.max(100, distance * 30);
     camera.updateProjectionMatrix();
-    controls.minDistance = distance * 0.05;
+    // Keep orbiting/zooming far enough to avoid near-plane slice artifacts.
+    controls.minDistance = distance * 0.2;
     controls.maxDistance = distance * 10;
     controls.update();
 }
@@ -265,8 +268,9 @@ async function loadModel(modelInfo) {
         const cached = modelCache.get(modelInfo.name);
         currentModel = cached.scene.clone();
         scene.add(currentModel);
+        patchSkinnedMeshSkeleton(currentModel);
         centerModel();
-        setupAnimations();
+        setupAnimations({ hasAnimations: cached.animations && cached.animations.length > 0 });
         if (cached.animations && cached.animations.length > 0) {
             mixer = new THREE.AnimationMixer(currentModel);
             clipActions.clear();
@@ -293,12 +297,11 @@ async function loadModel(modelInfo) {
 
         currentModel = gltf.scene;
         scene.add(currentModel);
+        patchSkinnedMeshSkeleton(currentModel);
 
         modelCache.set(modelInfo.name, { scene: currentModel.clone(), animations: gltf.animations || [] });
 
-        centerModel();
-        setupAnimations();
-
+        setupAnimations({ hasAnimations: gltf.animations && gltf.animations.length > 0 });
         if (gltf.animations && gltf.animations.length > 0) {
             mixer = new THREE.AnimationMixer(currentModel);
             clipActions.clear();
@@ -315,6 +318,10 @@ async function loadModel(modelInfo) {
         }
 
         loadingEl.classList.add('hidden');
+
+        requestAnimationFrame(() => {
+            centerModel();
+        });
     } catch (error) {
         console.error('Failed to load model:', error);
         loadingEl.querySelector('p').textContent = 'Failed to load: ' + modelInfo.name;
@@ -322,18 +329,70 @@ async function loadModel(modelInfo) {
     }
 }
 
+function patchSkinnedMeshSkeleton(root) {
+    root.traverse((obj) => {
+        if (obj.isSkinnedMesh && obj.skeleton && obj.skeleton.bones) {
+            // Avoid frustum culling / bounding-sphere computations that can touch invalid bones.
+            obj.frustumCulled = false;
+            const bones = obj.skeleton.bones;
+            const fallback = bones.find((b) => b != null);
+            if (fallback) {
+                for (let i = 0; i < bones.length; i++) {
+                    if (bones[i] == null) bones[i] = fallback;
+                }
+            }
+        }
+    });
+}
+
+function getBoundsSafe(obj) {
+    obj.updateMatrixWorld(true);
+    let useFallback = false;
+    obj.traverse((c) => { if (c.isSkinnedMesh) useFallback = true; });
+    if (!useFallback) {
+        try {
+            const box = new THREE.Box3().setFromObject(obj);
+            if (!box.isEmpty()) return box;
+        } catch (_) {}
+    }
+    const fallback = new THREE.Box3();
+    const _v = new THREE.Vector3();
+
+    // IMPORTANT: do not call geometry.computeBoundingBox() here.
+    // On some skinned models (like Ogre), that can block the main thread for a long time.
+    // Instead, sample a subset of vertices from the position attribute.
+    const SAMPLE_TARGET = 5000;
+    obj.traverse((child) => {
+        if (!child.isMesh || !child.geometry) return;
+        const pos = child.geometry.attributes?.position;
+        if (!pos || !pos.count) return;
+
+        const count = pos.count;
+        const step = Math.max(1, Math.floor(count / SAMPLE_TARGET));
+        const arr = pos.array;
+
+        for (let i = 0; i < count; i += step) {
+            const ix = i * 3;
+            _v.set(arr[ix], arr[ix + 1], arr[ix + 2]);
+            _v.applyMatrix4(child.matrixWorld);
+            fallback.expandByPoint(_v);
+        }
+    });
+    if (fallback.isEmpty()) fallback.setFromCenterAndSize(new THREE.Vector3(0, 0, 0), new THREE.Vector3(2, 2, 2));
+    return fallback;
+}
+
 function centerModel() {
     if (!currentModel) return;
 
-    const preBox = new THREE.Box3().setFromObject(currentModel);
+    const preBox = getBoundsSafe(currentModel);
     const preSize = preBox.getSize(new THREE.Vector3());
     const preMaxDim = Math.max(preSize.x, preSize.y, preSize.z);
     const scale = preMaxDim > 0 ? 2.0 / preMaxDim : 1.0;
     currentModel.scale.setScalar(scale);
-    // Warcraft III / MDX use Z-up; Three.js uses Y-up — rotate so model stands upright
     currentModel.rotation.x = -Math.PI / 2;
 
-    const box = new THREE.Box3().setFromObject(currentModel);
+    const box = getBoundsSafe(currentModel);
     const center = box.getCenter(new THREE.Vector3());
     currentModel.position.x -= center.x;
     currentModel.position.z -= center.z;
@@ -349,8 +408,14 @@ function centerModel() {
     fitCameraToObject(currentModel, { padding: 1.35 });
 }
 
-function setupAnimations() {
+function setupAnimations({ hasAnimations = false } = {}) {
     animButtonsEl.innerHTML = '';
+
+    if (!hasAnimations) {
+        animButtonsEl.textContent = 'No animations in this model';
+        return;
+    }
+
     const defaultAnims = ['Stand', 'Walk', 'Attack', 'Death', 'Spell'];
 
     defaultAnims.forEach((anim, index) => {
@@ -418,7 +483,7 @@ function setupControls() {
     });
     document.getElementById('btn-front').addEventListener('click', () => {
         if (!currentModel) return;
-        const box = new THREE.Box3().setFromObject(currentModel);
+        const box = getBoundsSafe(currentModel);
         const center = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
         const d = Math.max(size.x, size.y, size.z) * 0.8;
@@ -428,7 +493,7 @@ function setupControls() {
     });
     document.getElementById('btn-side').addEventListener('click', () => {
         if (!currentModel) return;
-        const box = new THREE.Box3().setFromObject(currentModel);
+        const box = getBoundsSafe(currentModel);
         const center = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
         const d = Math.max(size.x, size.y, size.z) * 0.8;

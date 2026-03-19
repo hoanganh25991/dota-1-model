@@ -6,7 +6,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { mat4 } from 'gl-matrix';
+import { mat4, quat } from 'gl-matrix';
 import { parseMDX, decodeBLP, getBLPImageData } from 'war3-model';
 import UPNG from 'upng-js';
 
@@ -315,7 +315,13 @@ function convertToGLB(model, modelDir) {
             const jointsBuf = Buffer.alloc(vCount * 4);
             const weightsBuf = Buffer.alloc(vCount * 4 * 4);
             for (let i = 0; i < vCount; i++) {
-                const j = Math.min(geoset.VertexGroup[i], bones.length - 1);
+                // MDX VertexGroup can contain invalid indices (commonly -1 for "no bone").
+                // glTF/Three.js expects joint indices in [0, bones.length - 1].
+                let j = geoset.VertexGroup[i];
+                if (!Number.isFinite(j)) j = 0;
+                j = Math.trunc(j);
+                if (j < 0) j = 0;
+                j = Math.min(j, bones.length - 1);
                 jointsBuf.writeUInt8(j, i * 4);
                 jointsBuf.writeUInt8(0, i * 4 + 1);
                 jointsBuf.writeUInt8(0, i * 4 + 2);
@@ -420,13 +426,14 @@ function convertToGLB(model, modelDir) {
 
         meshNodeIndex = bones.length;
         gltfNodes.push({ name: model.Info?.Name || 'Model', mesh: 0, skin: 0 });
+        const rootNodeIndex = bones.length + 1;
+        gltfNodes.push({ name: 'Root', children: [...bones.map((_, i) => i), meshNodeIndex] });
+        meshNodeIndex = rootNodeIndex;
     } else {
-        gltfNodes = [{ name: model.Info?.Name || 'Model', mesh: 0 }];
+        gltfNodes.push({ name: model.Info?.Name || 'Model', mesh: 0 });
     }
 
     if (bones.length > 0 && sequences.length > 0) {
-        let accBase = accessors.length;
-
         for (let seqIdx = 0; seqIdx < sequences.length; seqIdx++) {
             const seq = sequences[seqIdx];
             const interval = seq.Interval;
@@ -470,6 +477,11 @@ function convertToGLB(model, modelDir) {
                 }
             }
 
+            // Ensure sampler input covers full sequence range even if no bone keys
+            // land exactly on the start/end interval boundaries.
+            timeSet.add(0);
+            timeSet.add((endFrame - startFrame) / WC3_FRAME_RATE);
+
             const times = Array.from(timeSet).sort((a, b) => a - b);
             if (times.length === 0) continue;
 
@@ -479,7 +491,7 @@ function convertToGLB(model, modelDir) {
             bufferChunks.push(timeBuf);
             bufferOffset += timeBuf.length;
             bufferViews.push({ buffer: 0, byteOffset: tOff, byteLength: timeBuf.length, target: 34962 });
-            const timeAcc = accBase++;
+            const timeAcc = accessors.length;
             accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: times.length, type: 'SCALAR' });
 
             const seqChannels = [];
@@ -490,7 +502,19 @@ function convertToGLB(model, modelDir) {
                 const vals = new Float32Array(times.length * 3);
                 for (let i = 0; i < times.length; i++) {
                     const t = times[i];
-                    let k0 = keys[0], k1 = keys[keys.length - 1];
+                    const first = keys[0];
+                    const last = keys[keys.length - 1];
+
+                    if (t <= first.t) {
+                        for (let c = 0; c < 3; c++) vals[i * 3 + c] = first.v[c];
+                        continue;
+                    }
+                    if (t >= last.t) {
+                        for (let c = 0; c < 3; c++) vals[i * 3 + c] = last.v[c];
+                        continue;
+                    }
+
+                    let k0 = first, k1 = last;
                     for (let j = 0; j < keys.length - 1; j++) {
                         if (keys[j].t <= t && keys[j + 1].t >= t) {
                             k0 = keys[j];
@@ -498,7 +522,7 @@ function convertToGLB(model, modelDir) {
                             break;
                         }
                     }
-                    const u = k1.t > k0.t ? (t - k0.t) / (k1.t - k0.t) : 0;
+                    const u = (t - k0.t) / (k1.t - k0.t);
                     for (let c = 0; c < 3; c++) vals[i * 3 + c] = k0.v[c] + u * (k1.v[c] - k0.v[c]);
                 }
                 const buf = Buffer.from(vals.buffer, vals.byteOffset, vals.byteLength);
@@ -506,16 +530,44 @@ function convertToGLB(model, modelDir) {
                 bufferChunks.push(buf);
                 bufferOffset += buf.length;
                 bufferViews.push({ buffer: 0, byteOffset: vo, byteLength: buf.length, target: 34962 });
+                const outAcc = accessors.length;
                 accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: times.length, type: 'VEC3' });
-                seqSamplers.push({ input: timeAcc, output: accBase - 1, interpolation: 'LINEAR' });
+                seqSamplers.push({ input: timeAcc, output: outAcc, interpolation: 'LINEAR' });
                 seqChannels.push({ sampler: seqSamplers.length - 1, target: { node: nodeIndex, path: 'translation' } });
             });
             rotByNode.forEach((keys, nodeIndex) => {
                 keys.sort((a, b) => a.t - b.t);
+
+                // Normalize quaternion keys once (MDX quaternions are not guaranteed to be unit length).
+                for (const key of keys) {
+                    const v = key.v;
+                    const q = quat.fromValues(v[0], v[1], v[2], v[3]);
+                    quat.normalize(q, q);
+                    v[0] = q[0];
+                    v[1] = q[1];
+                    v[2] = q[2];
+                    v[3] = q[3];
+                }
+
                 const vals = new Float32Array(times.length * 4);
+                const q0 = quat.create();
+                const q1 = quat.create();
+                const outQ = quat.create();
                 for (let i = 0; i < times.length; i++) {
                     const t = times[i];
-                    let k0 = keys[0], k1 = keys[keys.length - 1];
+                    const first = keys[0];
+                    const last = keys[keys.length - 1];
+
+                    if (t <= first.t) {
+                        for (let c = 0; c < 4; c++) vals[i * 4 + c] = first.v[c];
+                        continue;
+                    }
+                    if (t >= last.t) {
+                        for (let c = 0; c < 4; c++) vals[i * 4 + c] = last.v[c];
+                        continue;
+                    }
+
+                    let k0 = first, k1 = last;
                     for (let j = 0; j < keys.length - 1; j++) {
                         if (keys[j].t <= t && keys[j + 1].t >= t) {
                             k0 = keys[j];
@@ -523,16 +575,20 @@ function convertToGLB(model, modelDir) {
                             break;
                         }
                     }
-                    const u = k1.t > k0.t ? (t - k0.t) / (k1.t - k0.t) : 0;
-                    for (let c = 0; c < 4; c++) vals[i * 4 + c] = k0.v[c] + u * (k1.v[c] - k0.v[c]);
+                    const u = (t - k0.t) / (k1.t - k0.t);
+                    q0[0] = k0.v[0]; q0[1] = k0.v[1]; q0[2] = k0.v[2]; q0[3] = k0.v[3];
+                    q1[0] = k1.v[0]; q1[1] = k1.v[1]; q1[2] = k1.v[2]; q1[3] = k1.v[3];
+                    quat.slerp(outQ, q0, q1, u);
+                    for (let c = 0; c < 4; c++) vals[i * 4 + c] = outQ[c];
                 }
                 const buf = Buffer.from(vals.buffer, vals.byteOffset, vals.byteLength);
                 const vo = bufferOffset;
                 bufferChunks.push(buf);
                 bufferOffset += buf.length;
                 bufferViews.push({ buffer: 0, byteOffset: vo, byteLength: buf.length, target: 34962 });
+                const outAcc = accessors.length;
                 accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: times.length, type: 'VEC4' });
-                seqSamplers.push({ input: timeAcc, output: accBase - 1, interpolation: 'LINEAR' });
+                seqSamplers.push({ input: timeAcc, output: outAcc, interpolation: 'LINEAR' });
                 seqChannels.push({ sampler: seqSamplers.length - 1, target: { node: nodeIndex, path: 'rotation' } });
             });
             scaleByNode.forEach((keys, nodeIndex) => {
@@ -540,7 +596,19 @@ function convertToGLB(model, modelDir) {
                 const vals = new Float32Array(times.length * 3);
                 for (let i = 0; i < times.length; i++) {
                     const t = times[i];
-                    let k0 = keys[0], k1 = keys[keys.length - 1];
+                    const first = keys[0];
+                    const last = keys[keys.length - 1];
+
+                    if (t <= first.t) {
+                        for (let c = 0; c < 3; c++) vals[i * 3 + c] = first.v[c];
+                        continue;
+                    }
+                    if (t >= last.t) {
+                        for (let c = 0; c < 3; c++) vals[i * 3 + c] = last.v[c];
+                        continue;
+                    }
+
+                    let k0 = first, k1 = last;
                     for (let j = 0; j < keys.length - 1; j++) {
                         if (keys[j].t <= t && keys[j + 1].t >= t) {
                             k0 = keys[j];
@@ -548,7 +616,7 @@ function convertToGLB(model, modelDir) {
                             break;
                         }
                     }
-                    const u = k1.t > k0.t ? (t - k0.t) / (k1.t - k0.t) : 0;
+                    const u = (t - k0.t) / (k1.t - k0.t);
                     for (let c = 0; c < 3; c++) vals[i * 3 + c] = k0.v[c] + u * (k1.v[c] - k0.v[c]);
                 }
                 const buf = Buffer.from(vals.buffer, vals.byteOffset, vals.byteLength);
@@ -556,8 +624,9 @@ function convertToGLB(model, modelDir) {
                 bufferChunks.push(buf);
                 bufferOffset += buf.length;
                 bufferViews.push({ buffer: 0, byteOffset: vo, byteLength: buf.length, target: 34962 });
+                const outAcc = accessors.length;
                 accessors.push({ bufferView: bufferViews.length - 1, componentType: 5126, count: times.length, type: 'VEC3' });
-                seqSamplers.push({ input: timeAcc, output: accBase - 1, interpolation: 'LINEAR' });
+                seqSamplers.push({ input: timeAcc, output: outAcc, interpolation: 'LINEAR' });
                 seqChannels.push({ sampler: seqSamplers.length - 1, target: { node: nodeIndex, path: 'scale' } });
             });
 
@@ -569,7 +638,8 @@ function convertToGLB(model, modelDir) {
 
     const totalBuffer = Buffer.concat(bufferChunks);
 
-    const sceneNodes = bones.length > 0 ? [meshNodeIndex, ...bones.map((_, i) => i)] : [0];
+    // Single root so loader creates bones then mesh in order (avoids undefined skeleton.bones)
+    const sceneNodes = bones.length > 0 ? [meshNodeIndex] : [0];
     const gltf = {
         asset: { version: '2.0', generator: 'MDXtoGLTF+BLP+Anim' },
         scene: 0,
