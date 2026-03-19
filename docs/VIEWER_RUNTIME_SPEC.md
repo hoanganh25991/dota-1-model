@@ -1,16 +1,50 @@
 # Runtime Spec (`js/viewer.js`)
 
-This document specifies how the browser viewer loads `WarcraftModels/manifest.json`, loads a selected `models/<id>.glb`, centers/scales it, and plays the embedded glTF animation clips.
+This document specifies how the browser viewer loads `WarcraftModels/manifest.json`, loads a selected `models/<id>.glb`, centers/scales it, and plays the embedded glTF animation clips. It is aligned with `js/viewer.js` so a reimplementation or audit can rely on this file.
+
+## Module imports
+- `three` (namespace `THREE`)
+- `GLTFLoader` from `three/addons/loaders/GLTFLoader.js`
+- `OrbitControls` from `three/addons/controls/OrbitControls.js`
+- `RoomEnvironment` from `three/addons/environments/RoomEnvironment.js`
+
+## Constants (must match code)
+
+| Constant | Value | Purpose |
+| -------- | ----- | ------- |
+| `MANIFEST_URL` | `'WarcraftModels/manifest.json'` | Relative URL for `fetch()` |
+| `MDX_ANIM_BASE_SCALE` | `25` | Multiplies animation delta × speed slider; tunes perceived WC3-like speed |
+| `WC3_Z_UP_TO_Y_UP` | `-Math.PI / 2` | `rotateX` on loaded root to map MDX Z-up to Three.js Y-up |
+| `CAMERA_YAW_CORRECTION` | `Math.PI / 2` | Y-axis rotation on camera direction presets |
+| Initial `camera.position` (before framing) | `(0, 2, 5)` | Overridden after `frameModelAndCamera` for loaded models |
+| `targetSize` (framing) | `6` | World units: max axis of AABB after scale |
+| Scale cap | `min(targetSize/maxDim, 1000)` | Prevents extreme scales |
+| Near-zero mesh skip | `maxWorldAxisScale < 1e-5` | Treats hidden/scaled-down geosets as invisible for bounds |
+
+## Global state (module-level)
+
+Key variables used across functions:
+- `scene`, `camera`, `renderer`, `controls`, `clock`
+- `modelGroup` — parent of loaded `gltf.scene`
+- `currentModel`, `mixer`, `currentClips`
+- `allModels`, `filteredModels`
+- `activeCategory` (starts `'all'`), `searchQuery` (starts `''`)
+- `animationSpeed` (starts `1`) — multiplied by `MDX_ANIM_BASE_SCALE` in `mixer.update`
+- `applyingUrlQuery` — when `true`, `writeUrlQuery` is a no-op (initial URL hydration, `syncFromUrl`)
+- `modelFrameDistance` — last computed camera distance for presets (default `8`)
+- `lightPreset` — `'default'` | `'dark'` | `'bright'`
 
 ## High-level responsibilities
 The runtime is responsible for:
 1. Fetching the manifest and building a model list UI
-2. Parsing URL query parameters for category + selected model
-3. Loading the selected GLB via `THREE.GLTFLoader`
-4. Converting axes (WC3 Z-up -> Three.js Y-up)
-5. Playing animation clips via `THREE.AnimationMixer`
-6. Centering/scaling the model and placing the camera based on visible geometry
-7. Handling view presets (front/side/reset) and speed/lighting controls
+2. Filtering by category and search (name + id)
+3. Parsing URL query parameters for category + selected model
+4. Loading the selected GLB via `THREE.GLTFLoader`
+5. Converting axes (WC3 Z-up → Three.js Y-up)
+6. Playing animation clips via `THREE.AnimationMixer`
+7. Centering/scaling the model and placing the camera based on visible geometry
+8. Handling view presets (front/side/reset) and speed/lighting controls
+9. Disposing resources when switching models
 
 ## Manifest contract
 
@@ -20,11 +54,13 @@ The viewer expects a JSON file at:
 Expected shape:
 - `{ "models": [ { id, name, category, path }, ... ] }`
 
-For backward compatibility, the loader attempts to infer missing fields:
-- `id` can be `m.id` or derived from `m.file` or `m.name`
-- `path` can be `m.path` or `m.glb` or derived from `models/<id>.glb`
+For backward compatibility, the loader maps each manifest row to:
+- `id`: `m.id || m.file?.replace(/\.(mdx|glb)$/i, '') || m.name`
+- `name`: `m.name || m.id || 'Unknown'`
+- `category`: `m.category || 'Unit'`
+- `path`: `m.path || m.glb || \`models/${(m.id || m.file || m.name).replace(/\.(mdx|glb)$/i, '')}.glb\``
 
-The viewer sorts `allModels` by `name` (case-insensitive), then by `id`.
+The viewer sorts `allModels` by `name` (case-insensitive, `localeCompare` with `sensitivity: 'base'`), then by `id` if names tie.
 
 ## URL query parameters
 
@@ -32,53 +68,80 @@ Viewer reads:
 - `?category=<lowercase category>` (optional)
 - `&model=<manifest id>` (optional)
 
-It updates the URL using `history.replaceState` in response to:
-- category selection changes
-- model selection changes
+`writeUrlQuery(modelId)` (skipped when `applyingUrlQuery === true`):
+- If `activeCategory === 'all'` **and** `modelId` is falsy: removes both `category` and `model` query params.
+- Otherwise: sets `category` to `'all'` (lowercase) when category is all, else `activeCategory.toLowerCase()`; sets or deletes `model` from `modelId`.
+- Uses `history.replaceState` only when the resulting URL string differs.
 
 On browser back/forward:
-- `popstate` triggers `syncFromUrl()`
+- `popstate` triggers `syncFromUrl()` which re-reads query, updates category UI, re-renders list/select, and loads/clears model per `model` param.
+
+### Category resolution
+- `resolveCategoryFromParam(param)`: if missing → `'all'`; else finds first category in `getCategories()` whose lowercase matches `param.toLowerCase()`, else `'all'`.
+- `getCategories()`: `['all', ...sorted unique categories from allModels]`.
+
+## Search and list filtering
+- `searchQuery` is updated from `#search-input` input events.
+- `renderModelList()` keeps `filteredModels` where:
+  - category matches `activeCategory` (or all), **and**
+  - search matches `m.name` or `m.id` (case-insensitive substring) or search is empty.
+- `#model-count` shows `filteredModels.length`.
+
+## Category + model dropdowns (`renderCategorySelect`, `renderModelSelect`)
+
+- `#category-filter` inner HTML is replaced with a row for **Type** (`#category-select`) and **Model** (`#model-select`).
+- `renderCategorySelect()` runs after manifest load: builds options from `getCategories()`, sets value to `activeCategory`, wires `change` → `onCategorySelectChange`.
+- `onCategorySelectChange`: sets `activeCategory`, `clearViewerSelection()`, `renderModelList()`, `renderModelSelect()`, `writeUrlQuery(null)`.
+- `renderModelSelect()`: placeholder option `— Select model —`, options from `filteredModels`; restores previous selection if still present.
+- `onModelSelectChange`: empty value → `clearViewerSelection()` + `writeUrlQuery(null)`; else `loadModel(id)`.
 
 ## Scene initialization (`init()`)
 
 Creates:
-- `scene = new THREE.Scene()`
-  - `scene.background = Color(0x0a0a0f)`
-- `camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 1000)`
-- `renderer = new THREE.WebGLRenderer({ canvas, antialias: true })`
-  - pixel ratio capped at 2
-  - output color space set to SRGB
-  - ACES tone mapping enabled
-  - shadow mapping enabled
+- `scene = new THREE.Scene()` with `scene.background = new THREE.Color(0x0a0a0f)`
+- `camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000)` — initial aspect **1** until `resize()` runs
+- `camera.position.set(0, 2, 5)` (overwritten after successful `frameModelAndCamera` on load)
+- `renderer = new THREE.WebGLRenderer({ canvas: #canvas, antialias: true })`
+  - `setPixelRatio(min(devicePixelRatio, 2))`
+  - `outputColorSpace = SRGBColorSpace`
+  - `toneMapping = ACESFilmicToneMapping`, `toneMappingExposure = 1`
+  - `shadowMap.enabled = true`, `shadowMap.type = PCFSoftShadowMap`
 - `controls = new OrbitControls(camera, canvas)`
-  - damping enabled
-  - min/max distance set
-  - `controls.target = (0,0,0)`
+  - `enableDamping = true`, `dampingFactor = 0.05`
+  - `minDistance = 0.5`, `maxDistance = 50` (may increase after framing)
+  - `controls.target.set(0, 0, 0)`
 
 Lighting and environment:
-- adds `AmbientLight` and `DirectionalLight` (with shadows)
-- adds `RoomEnvironment` + PMREM to `scene.environment`
+- `AmbientLight(0xffffff, LIGHT_PRESETS.default.ambient)` — default ambient **0.4**
+- `DirectionalLight(0xffffff, LIGHT_PRESETS.default.directional)` — default **0.8**, `position.set(5, 10, 7)`, `castShadow = true`, shadow map **2048×2048**
+- `RoomEnvironment` → `PMREMGenerator(renderer).fromScene(env).texture` → `scene.environment`
+
+Scene graph:
+- `modelGroup = new THREE.Group()`, `scene.add(modelGroup)` — loaded GLB roots are parented here.
+
+`clock = new THREE.Clock()`.
 
 Resize:
-- `resize()` reads `#viewer` size and updates:
-  - renderer size
-  - camera aspect
-  - projection matrix
+- Initial `resize()` call; `window` `resize` listener; `ResizeObserver` on `#viewer` → both call `resize()`
+- `resize()`: reads `#viewer` client size; if `w` or `h` ≤ 0, sets each to `max(value, 100)`; updates renderer size, pixel ratio, `camera.aspect`, `camera.updateProjectionMatrix()`
 
 ## Model loading (`loadModel(id)`)
 
-### Lookup and UI synchronization
-`id` is resolved from the manifest list `allModels`.
-The viewer updates:
-- `#current-model` text
-- active model highlight in `.model-item`
-- selected value in `#model-select` if present
-- URL query parameters via `writeUrlQuery(id)`
+### Early exit
+- If `allModels.find(m => m.id === id)` is undefined, **return** (no GLTF fetch).
+
+### Order of operations (before GLTF)
+1. `writeUrlQuery(id)` — updates URL unless `applyingUrlQuery`
+2. `clearCurrentModel()` — dispose previous asset
+3. `#current-model` text ← `model.name`
+4. `.model-item` elements: toggle `.active` where `dataset.id === id`
+5. `#model-select`: set `value` to `id` if `filteredModels` contains that id
 
 ### glTF loading
 Uses:
 - `new GLTFLoader()`
-- `loader.load(model.path, onLoad)`
+- `loader.load(model.path, onLoad, undefined, onError)`
+- `onError`: logs `Failed to load model:` to console (no user-visible error UI)
 
 On load:
 1. `currentModel = gltf.scene`
@@ -106,6 +169,12 @@ It then:
 - builds the animation UI for these clips (`renderAnimationButtons`)
 - plays clip index `0` if clips exist (`playClipAtIndex`)
 
+### `playClipAtIndex(clips, index)`
+- No-op if `!mixer` or no clips / invalid index.
+- `mixer.stopAllAction()`, `clipAction(clip)`, `reset()`, `setLoop(LoopRepeat, Infinity)`, `clampWhenFinished = false`, `play()`.
+- Syncs `#animation-select` value to `index` if present.
+- Sets `.active` on `#animation-buttons .animation-btn` where `data-index` matches.
+
 ### Ensure frame 0 is evaluated before centering
 Geoset visibility can be authored as scale 0/1 driven by geoset alpha animation channels.
 To center based on visible geometry, the viewer forces mixer evaluation at start:
@@ -116,17 +185,24 @@ To center based on visible geometry, the viewer forces mixer evaluation at start
 Then it calls:
 - `frameModelAndCamera(currentModel)`
 
-### Animation UI integration
-Clip names:
-- Buttons and dropdown use `clip.name` when available, otherwise `Anim <i>`.
+Post-framing:
+- If `#view-select` exists, sets value to `'front'`.
+- `controls.saveState()` — saved state is used by **Reset** (`applyViewPreset('reset')`).
+
+### Animation UI integration (`renderAnimationButtons`)
+- If `clips.length === 0`:
+  - `#animation-buttons` shows a “No animations” paragraph; `#animation-select` disabled with a single option.
+- Else:
+  - Buttons: one per clip, `data-index`, label `clip.name` or `Anim ${i}`.
+  - `#animation-select`: options `0..n-1`, same labels, enabled.
 
 Click behavior:
 - When a button is clicked:
   - `playClipAtIndex(currentClips, idx)`
   - `mixer.update(0)`
 
-Dropdown selection:
-- Similar: parses `idx` from the `<select>` and plays that clip.
+`#animation-select` `change`:
+- Parses index, `playClipAtIndex(currentClips, idx)`, `mixer.update(0)`.
 
 ## Animation playback loop (`animate()`)
 
@@ -169,10 +245,13 @@ Algorithm:
   - transform bounding box by `obj.matrixWorld`
   - union into `targetBox`
 
-Fallback:
-- if box empty: `box.setFromObject(root)`
-- if still empty:
-  - reset transforms and use a default camera position
+### Fallback (empty bounds)
+1. If `computeVisibleMeshesWorldBox` leaves the box empty: `box.setFromObject(root)`.
+2. If **still** empty:
+   - `root.position.set(0, 0, 0)`, `root.scale.setScalar(1)`
+   - `modelFrameDistance = 8`
+   - `camera.position.set(4.5, 3.2, 7.5)`, `controls.target.set(0, 0, 0)`
+   - `camera.near = 0.1`, `camera.far = 1000`, `updateProjectionMatrix`, `controls.update`, **return** (no scaling / auto camera dir)
 
 ### Scaling
 Once a non-empty `box` exists:
@@ -195,8 +274,10 @@ It re-computes visible boxes:
 ### Camera distance and placement
 Computes vertical and horizontal FOV-based distances:
 - uses `camera.fov`, `camera.aspect`
-- distV and distH from trig
+- `vFov = camera.fov` in radians; `hFov = 2 * atan(tan(vFov/2) * aspect)`
+- `distV = (maxDim2/2) / tan(vFov/2)`, `distH = (maxDim2/2) / tan(hFov/2)`
 - `dist = max(distV, distH, 1.5) * 1.15`
+- `maxDim2 = max(size2.x, size2.y, size2.z, maxDim * scale, 0.001)` — keeps a floor from pre-scale size × scale
 
 Sets:
 - `modelFrameDistance = dist`
@@ -225,9 +306,12 @@ Presets:
   - similar but near the side direction
 
 UI elements call this on button clicks:
-- `#btn-reset`
-- `#btn-front`
-- `#btn-side`
+- `#btn-reset` → `applyViewPreset('reset')`
+- `#btn-front` → `'front'`
+- `#btn-side` → `'side'`
+- `#view-select` `change` → `applyViewPreset(e.target.value)` (same presets as buttons; values must be `reset` / `front` / `side` if used)
+
+Helper `rotateAroundY(x, z, yaw)` rotates `(x,z)` in the XZ plane for preset camera bases.
 
 ## Material transparency handling (important for your GLBs)
 
@@ -244,15 +328,36 @@ This assumes the GLB exporter sets:
 
 ## Lighting presets (`setLightPreset`)
 
+`LIGHT_PRESETS`:
+- `default`: ambient `0.4`, directional `0.8`
+- `dark`: `0.2` / `0.4`
+- `bright`: `0.6` / `1.2`
+
 UI controls:
-- `#btn-light-default`
-- `#btn-light-dark`
-- `#btn-light-bright`
+- `#btn-light-default`, `#btn-light-dark`, `#btn-light-bright`
+- `#lighting-select` `change` → `setLightPreset(e.target.value)`
 
 Implementation:
-- adjusts intensities of `ambientLight` and `directionalLight`
-- toggles `.active` classes on buttons
+- sets `ambientLight.intensity` and `directionalLight.intensity`
+- toggles `.active` on `#controls button[id^="btn-light"]` where `b.id === 'btn-light-${name}'`
 - updates `#lighting-select` value if present
+
+## Speed slider (`#speed-slider`)
+- `input` sets `animationSpeed = parseFloat(e.target.value)`
+- `#speed-display`: if `animationSpeed < 10` show one decimal, else integer, suffixed with `x`
+
+## Startup (`main()`)
+1. `init()` then `setupUI()`.
+2. `await loadManifest()` inside `try`:
+   - Sets `applyingUrlQuery = true`
+   - Reads `category` + `model` from URL, `resolveCategoryFromParam`, `renderCategorySelect`, `renderModelList`, `renderModelSelect`
+   - If `modelParam` present and model exists and matches category: `loadModel(modelParam)`
+   - Sets `applyingUrlQuery = false`
+3. On manifest failure: `#model-count` = “Failed to load manifest”, `#model-list` shows hint to run `node scripts/generate-model-manifest.mjs`.
+4. Hides `#loading` (`classList.add('hidden')`).
+5. `requestAnimationFrame`: `resize()` then starts `animate()` loop.
+
+Note: `loadModel` calls `writeUrlQuery` during normal use; initial URL load uses `applyingUrlQuery` to avoid double history writes in some flows. `syncFromUrl` also sets `applyingUrlQuery` while syncing.
 
 ## Cleanup (`clearCurrentModel()`)
 
@@ -265,6 +370,30 @@ When switching models:
   - `o.material.dispose()` (or each element if array)
 - removes `currentModel` from `modelGroup`
 
+`clearViewerSelection()` additionally calls `clearCurrentModel()`, resets `#current-model` label, clears `.active` on items, clears `#model-select`.
+
+## Implementation map (`viewer.js`)
+
+| Function / block | Role |
+| ---------------- | ---- |
+| `init` | Scene, camera, renderer, controls, lights, environment, clock, resize listeners |
+| `resize` | Match `#viewer` size to renderer + camera aspect |
+| `loadManifest` | Fetch manifest, normalize rows, sort |
+| `renderModelList` | Filter + render `#model-list`, wire clicks to `loadModel` |
+| `playClipAtIndex` | Play clip by index, sync UI |
+| `readUrlQuery` / `writeUrlQuery` / `syncFromUrl` | URL state |
+| `renderCategorySelect` / `renderModelSelect` | Filters |
+| `maxWorldAxisScale` / `computeVisibleMeshesWorldBox` | Bounds ignoring near-zero scaled meshes |
+| `frameModelAndCamera` | Scale, center, place camera |
+| `loadModel` | GLTF load, axis fix, materials, mixer, frame 0, frame camera |
+| `clearCurrentModel` | Dispose + remove |
+| `renderAnimationButtons` | Build buttons + select |
+| `animate` | Mixer delta, controls, render |
+| `applyViewPreset` | Reset / front / side camera |
+| `setupUI` | Search, popstate, view/light/speed/animation listeners |
+| `setLightPreset` | Light intensities + UI |
+| `main` | Bootstrap |
+
 ## Practical implementation checklist (if you reimplement)
 
 If you want to replicate the same viewer behavior, ensure:
@@ -275,4 +404,9 @@ If you want to replicate the same viewer behavior, ensure:
 5. You run a per-frame mixer update with:
    - `delta * animationSpeed * MDX_ANIM_BASE_SCALE`
 6. You apply transparent-material depthWrite rules to avoid artifacts
+7. You match manifest field fallbacks and sort order if sharing `manifest.json` with this converter
+
+## Related docs
+- Converter / GLB contents: [`MDX_TO_GLB_SPEC.md`](MDX_TO_GLB_SPEC.md)
+- Index: [`SPEC_INDEX.md`](SPEC_INDEX.md)
 
