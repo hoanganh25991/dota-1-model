@@ -21,6 +21,18 @@ let activeCategory = 'all';
 let searchQuery = '';
 let animationSpeed = 1;
 
+/** MDX timelines are long in wall-clock seconds; ~25× matches typical WC3 in-engine speed at slider 1×. */
+const MDX_ANIM_BASE_SCALE = 25;
+
+/** Last camera distance used for Front / Side presets */
+let modelFrameDistance = 8;
+
+/** Reused when reading world scale from matrix columns */
+const _mxCol0 = new THREE.Vector3();
+const _mxCol1 = new THREE.Vector3();
+const _mxCol2 = new THREE.Vector3();
+const _tmpBox = new THREE.Box3();
+
 const LIGHT_PRESETS = {
   default: { ambient: 0.4, directional: 0.8 },
   dark: { ambient: 0.2, directional: 0.4 },
@@ -148,6 +160,92 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+/** Max axis scale from world matrix (detects geoset nodes scaled to 0 for hide). */
+function maxWorldAxisScale(matrixWorld) {
+  _mxCol0.setFromMatrixColumn(matrixWorld, 0);
+  _mxCol1.setFromMatrixColumn(matrixWorld, 1);
+  _mxCol2.setFromMatrixColumn(matrixWorld, 2);
+  return Math.max(_mxCol0.length(), _mxCol1.length(), _mxCol2.length());
+}
+
+/**
+ * World-space AABB from mesh geometry only, skipping near-zero-scale meshes.
+ * `Box3.setFromObject` can still include hidden MDX geosets (e.g. ground gibs at x≈-185) and pulls the center off-screen.
+ */
+function computeVisibleMeshesWorldBox(root, targetBox) {
+  targetBox.makeEmpty();
+  root.updateMatrixWorld(true);
+  root.traverse((obj) => {
+    if (!obj.isMesh) return;
+    if (maxWorldAxisScale(obj.matrixWorld) < 1e-5) return;
+    const geom = obj.geometry;
+    if (!geom?.getAttribute('position')) return;
+    if (!geom.boundingBox) geom.computeBoundingBox();
+    _tmpBox.copy(geom.boundingBox).applyMatrix4(obj.matrixWorld);
+    targetBox.union(_tmpBox);
+  });
+}
+
+/**
+ * Fit `root` in view: center on origin, scale to target size, place camera (not top-down).
+ * Call after mixer.update(0) so geoset visibility matches the first animation frame.
+ */
+function frameModelAndCamera(root) {
+  const box = new THREE.Box3();
+  computeVisibleMeshesWorldBox(root, box);
+  if (box.isEmpty()) {
+    box.setFromObject(root);
+  }
+  if (box.isEmpty()) {
+    root.position.set(0, 0, 0);
+    root.scale.setScalar(1);
+    modelFrameDistance = 8;
+    camera.position.set(4.5, 3.2, 7.5);
+    controls.target.set(0, 0, 0);
+    camera.near = 0.1;
+    camera.far = 1000;
+    camera.updateProjectionMatrix();
+    controls.update();
+    return;
+  }
+
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z, 0.001);
+
+  const targetSize = 6;
+  const scale = Math.min(targetSize / maxDim, 1000);
+  root.scale.setScalar(scale);
+  root.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
+  root.updateMatrixWorld(true);
+
+  const box2 = new THREE.Box3().setFromObject(root);
+  const center2 = box2.getCenter(new THREE.Vector3());
+  root.position.sub(center2);
+  root.updateMatrixWorld(true);
+
+  const boxVis = new THREE.Box3();
+  computeVisibleMeshesWorldBox(root, boxVis);
+  const size2 = boxVis.isEmpty() ? box2.getSize(new THREE.Vector3()) : boxVis.getSize(new THREE.Vector3());
+  const maxDim2 = Math.max(size2.x, size2.y, size2.z, maxDim * scale, 0.001);
+
+  const vFov = (camera.fov * Math.PI) / 180;
+  const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  const distV = maxDim2 / 2 / Math.tan(vFov / 2);
+  const distH = maxDim2 / 2 / Math.tan(hFov / 2);
+  const dist = Math.max(distV, distH, 1.5) * 1.15;
+  modelFrameDistance = dist;
+
+  // Front-quarter (Y-up): mostly +Z toward model, moderate elevation — avoids “top-down” feel.
+  const dir = new THREE.Vector3(0.52, 0.42, 0.74).normalize();
+  camera.position.copy(dir.multiplyScalar(dist));
+  controls.target.set(0, 0, 0);
+  camera.near = Math.max(0.01, dist * 0.002);
+  camera.far = Math.max(500, dist * 80);
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
 function getCategories() {
   const cats = new Set(allModels.map((m) => m.category));
   return ['all', ...Array.from(cats).sort()];
@@ -196,27 +294,6 @@ function loadModel(id) {
       });
       modelGroup.add(currentModel);
 
-      const box = new THREE.Box3().setFromObject(currentModel);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z, 0.001);
-
-      const targetSize = 6;
-      const scale = Math.min(targetSize / maxDim, 1000);
-      currentModel.scale.setScalar(scale);
-      // Position must account for scale: world_pos = position + scale * localVertex
-      // To center, we need: position = -scale * center
-      currentModel.position.set(
-        -center.x * scale,
-        -center.y * scale,
-        -center.z * scale
-      );
-
-      const distance = targetSize * 1.5;
-      camera.position.set(0, targetSize * 0.3, distance);
-      controls.target.set(0, 0, 0);
-      controls.update();
-
       mixer = new THREE.AnimationMixer(currentModel);
       currentClips = gltf.animations || [];
       renderAnimationButtons(currentClips);
@@ -225,8 +302,12 @@ function loadModel(id) {
         playClipAtIndex(currentClips, 0);
         document.querySelector('#animation-buttons .animation-btn')?.classList.add('active');
       }
-      // Apply first frame of active clip so skinned meshes match poses immediately
+      // Geoset hide/show + bones: must run before bounding box / centering
       mixer.update(0);
+      currentModel.updateMatrixWorld(true);
+
+      frameModelAndCamera(currentModel);
+      controls.saveState();
     },
     undefined,
     (err) => console.error('Failed to load model:', err)
@@ -281,7 +362,7 @@ function renderAnimationButtons(clips) {
 function animate() {
   requestAnimationFrame(animate);
   const delta = clock.getDelta();
-  if (mixer) mixer.update(delta * animationSpeed);
+  if (mixer) mixer.update(delta * animationSpeed * MDX_ANIM_BASE_SCALE);
   controls.update();
   renderer.render(scene, camera);
 }
@@ -297,13 +378,15 @@ function setupUI() {
   });
 
   document.getElementById('btn-front').addEventListener('click', () => {
-    camera.position.set(0, 0, 5);
+    const d = modelFrameDistance || 8;
+    camera.position.set(0, d * 0.38, d * 0.92);
     controls.target.set(0, 0, 0);
     controls.update();
   });
 
   document.getElementById('btn-side').addEventListener('click', () => {
-    camera.position.set(5, 0, 0);
+    const d = modelFrameDistance || 8;
+    camera.position.set(d * 0.95, d * 0.35, d * 0.12);
     controls.target.set(0, 0, 0);
     controls.update();
   });

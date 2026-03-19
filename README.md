@@ -41,7 +41,7 @@ dota-1-model/
 - **Search**: Filter by name across all models
 - **3D viewer** with orbit controls (drag/zoom/pan)
 - **Animation buttons**: Stand, Walk, Attack, Death, Spell (currently procedural; see [docs/ANIMATIONS.md](docs/ANIMATIONS.md) for real WC3 animation support)
-- **Speed slider**: Adjust animation speed (up to 80× — long MDX clips like *Decay Flesh* can be minutes long at 1×)
+- **Speed slider**: Adjust playback on top of a built-in **~25× WC3 baseline** (slider `1×` ≈ in-game speed; long clips like *Decay Flesh* may still need a higher slider value)
 - **Lighting presets**: Default, Dark, Bright
 
 ## Converting New Models
