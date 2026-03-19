@@ -21,7 +21,7 @@
     </div>
 
     <div id="header">
-        <h1>Warcraft 3 Model Browser</h1>
+        <h1>Warcraft 3 Model<br class="title-break-mobile">Browser</h1>
         <p id="model-count">Loading...</p>
     </div>
 
@@ -44,7 +44,12 @@
 
         <div class="control-section">
             <h3>View</h3>
-            <div class="control-row">
+            <select id="view-select" aria-label="View preset">
+                <option value="reset">Reset</option>
+                <option value="front">Front</option>
+                <option value="side">Side</option>
+            </select>
+            <div class="control-row" id="view-buttons">
                 <button id="btn-reset">Reset</button>
                 <button id="btn-front">Front</button>
                 <button id="btn-side">Side</button>
@@ -53,6 +58,7 @@
 
         <div class="control-section">
             <h3>Animation</h3>
+            <select id="animation-select" aria-label="Animation selection" disabled></select>
             <div id="animation-buttons"></div>
         </div>
 
@@ -67,7 +73,12 @@
 
         <div class="control-section">
             <h3>Lighting</h3>
-            <div class="control-row">
+            <select id="lighting-select" aria-label="Lighting preset">
+                <option value="default">Default</option>
+                <option value="dark">Dark</option>
+                <option value="bright">Bright</option>
+            </select>
+            <div class="control-row" id="lighting-buttons">
                 <button id="btn-light-default" class="active">Default</button>
                 <button id="btn-light-dark">Dark</button>
                 <button id="btn-light-bright">Bright</button>

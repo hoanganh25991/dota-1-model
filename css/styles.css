@@ -68,6 +68,10 @@ body {
     text-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
 }
 
+.title-break-mobile {
+    display: none;
+}
+
 #model-count {
     font-size: 12px;
     color: #666;
@@ -346,6 +350,27 @@ input[type="range"] {
     text-transform: uppercase;
 }
 
+/* Native selects (used on mobile for touch UX) */
+#view-select,
+#lighting-select,
+#animation-select {
+    display: none;
+    width: 100%;
+    padding: 10px 12px;
+    background: rgba(0, 255, 136, 0.08);
+    border: 1px solid rgba(0, 255, 136, 0.25);
+    border-radius: 8px;
+    color: #fff;
+    font-size: 13px;
+}
+
+#view-select:focus,
+#lighting-select:focus,
+#animation-select:focus {
+    outline: none;
+    border-color: #00ff88;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
     width: 6px;
@@ -374,5 +399,82 @@ input[type="range"] {
     }
     #controls {
         width: 250px;
+    }
+}
+
+@media (max-width: 600px) {
+    body {
+        overflow: auto;
+    }
+
+    #header {
+        position: relative;
+        top: auto;
+        left: auto;
+        right: auto;
+        padding: 16px 18px 10px;
+        pointer-events: none;
+        z-index: 10;
+    }
+
+    .title-break-mobile {
+        display: inline;
+    }
+
+    #sidebar {
+        position: relative;
+        width: 100%;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid rgba(0, 255, 136, 0.2);
+    }
+
+    #viewer {
+        position: relative;
+        left: auto;
+        right: auto;
+        top: auto;
+        bottom: auto;
+        height: 52vh;
+        min-height: 320px;
+    }
+
+    #controls {
+        position: relative;
+        width: 100%;
+        height: auto;
+        right: auto;
+        top: auto;
+        overflow-y: visible;
+        padding: 16px 18px;
+        border-left: none;
+        border-top: 1px solid rgba(0, 255, 136, 0.2);
+    }
+
+    #model-list {
+        display: none;
+    }
+
+    /* Replace button grids with native selects */
+    #view-buttons,
+    #lighting-buttons,
+    #animation-buttons {
+        display: none;
+    }
+
+    #view-select,
+    #lighting-select,
+    #animation-select {
+        display: block;
+    }
+
+    /* Better info positioning for stacked layout */
+    #info {
+        position: relative;
+        left: auto;
+        transform: none;
+        bottom: auto;
+        margin: 10px 0 0;
+        text-align: center;
     }
 }

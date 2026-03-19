@@ -77,7 +77,8 @@ function blpToPngBytes(blpPath) {
 function sampleAnimVector(anim, frame, seqStart, seqEnd) {
   if (!anim || !anim.Keys || anim.Keys.length === 0) return null;
   // Only consider keyframes that belong to this sequence's range
-  const keys = anim.Keys.filter(k => k.Frame >= seqStart && k.Frame <= seqEnd);
+  // Treat seqEnd as exclusive so looping clips don't double-sample the boundary frame.
+  const keys = anim.Keys.filter(k => k.Frame >= seqStart && k.Frame < seqEnd);
   if (keys.length === 0) return null;
   if (keys.length === 1) return Array.from(keys[0].Vector);
 
@@ -290,37 +291,57 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
   const textureCache = new Map();
   const materials = [];
   for (const mat of model.Materials || []) {
-    const layer = mat.Layers?.[0];
-    const texId = typeof layer?.TextureID === 'number' ? layer.TextureID : 0;
-    const texEntry = model.Textures?.[texId];
-    let texPath = texEntry?.Image && String(texEntry.Image).trim();
-    if (!texPath && texEntry?.ReplaceableId > 0) {
-      texPath = findFallbackTextureImage(model);
-    }
+    const layers = mat.Layers || [];
+
+    // Pick the first layer that actually resolves to a usable texture.
+    // Some WC3 materials store the visible base texture in layer[1..], while layer[0]
+    // is a replaceable texture (missing image) -> would render as white otherwise.
     let tex = null;
-    if (texPath) {
-      const resolved = resolveTexturePath(modelDir, texPath);
-      if (resolved) {
-        const ext = path.extname(resolved).toLowerCase();
-        let imgBytes = null;
-        if (ext === '.blp') {
-          imgBytes = blpToPngBytes(resolved);
-        } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
-          imgBytes = fs.readFileSync(resolved);
-        }
-        if (imgBytes) {
-          const cacheKey = resolved;
-          if (!textureCache.has(cacheKey)) {
-            const texture = doc.createTexture().setImage(imgBytes).setMimeType('image/png');
-            textureCache.set(cacheKey, texture);
-          }
-          tex = textureCache.get(cacheKey);
-        }
+    let selectedLayer = null;
+    let alpha = 1;
+    let doubleSided = false;
+
+    for (const layer of layers) {
+      if (layer?.Shading & LAYER_TWO_SIDED) doubleSided = true;
+
+      const texId = typeof layer?.TextureID === 'number' ? layer.TextureID : 0;
+      const texEntry = model.Textures?.[texId];
+
+      let texPath = texEntry?.Image && String(texEntry.Image).trim();
+      if (!texPath && texEntry?.ReplaceableId > 0) {
+        texPath = findFallbackTextureImage(model);
       }
+
+      if (!texPath) continue;
+
+      const resolved = resolveTexturePath(modelDir, texPath);
+      if (!resolved) continue;
+
+      const ext = path.extname(resolved).toLowerCase();
+      let imgBytes = null;
+      if (ext === '.blp') {
+        imgBytes = blpToPngBytes(resolved);
+      } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
+        imgBytes = fs.readFileSync(resolved);
+      }
+      if (!imgBytes) continue;
+
+      const cacheKey = resolved;
+      if (!textureCache.has(cacheKey)) {
+        const texture = doc.createTexture().setImage(imgBytes).setMimeType('image/png');
+        textureCache.set(cacheKey, texture);
+      }
+      tex = textureCache.get(cacheKey);
+      selectedLayer = layer;
+      alpha = typeof layer?.Alpha === 'number' ? layer.Alpha : alpha;
+      break;
     }
-    const pbr = doc.createMaterial().setBaseColorFactor([1, 1, 1, 1]);
+
+    const alphaClamped = Math.max(0, Math.min(1, alpha));
+    const pbr = doc.createMaterial().setBaseColorFactor([1, 1, 1, alphaClamped]);
     if (tex) pbr.setBaseColorTexture(tex);
-    if (layer?.Shading & LAYER_TWO_SIDED) pbr.setDoubleSided(true);
+    if (doubleSided) pbr.setDoubleSided(true);
+    pbr.setAlphaMode(alphaClamped < 1 ? 'BLEND' : 'OPAQUE');
     materials.push(pbr);
   }
 
@@ -382,7 +403,9 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
     // the first key at ~111s so AnimationMixer at t=0 clamps to frame 0 pose → "no walk".
     const times = [];
     const frames = [];
-    for (let f = startFrame; f <= endFrame; f++) {
+    // Treat endFrame as exclusive. This prevents a visible “pop” on LoopRepeat when
+    // the last sampled boundary pose differs from the first pose.
+    for (let f = startFrame; f < endFrame; f++) {
       times.push((f - startFrame) / fps);
       frames.push(f);
     }
@@ -407,10 +430,29 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
         scales.push(...gltf.s);
       }
 
+      // Since the viewer plays every clip with `LoopRepeat`, ensure the last sampled keyframe
+      // matches the first sampled keyframe. This avoids boundary pops on skeletal/geo nodes
+      // that are not authored as perfectly seamless loops.
+      if (frames.length > 1) {
+        const lastFrameIdx = frames.length - 1;
+        translations[(lastFrameIdx * 3) + 0] = translations[0];
+        translations[(lastFrameIdx * 3) + 1] = translations[1];
+        translations[(lastFrameIdx * 3) + 2] = translations[2];
+
+        rotations[(lastFrameIdx * 4) + 0] = rotations[0];
+        rotations[(lastFrameIdx * 4) + 1] = rotations[1];
+        rotations[(lastFrameIdx * 4) + 2] = rotations[2];
+        rotations[(lastFrameIdx * 4) + 3] = rotations[3];
+
+        scales[(lastFrameIdx * 3) + 0] = scales[0];
+        scales[(lastFrameIdx * 3) + 1] = scales[1];
+        scales[(lastFrameIdx * 3) + 2] = scales[2];
+      }
+
       // Only create channels for nodes that actually animate in this sequence
-      const hasTransInSeq = (node.Translation?.Keys || []).some(k => k.Frame >= startFrame && k.Frame <= endFrame);
-      const hasRotInSeq = (node.Rotation?.Keys || []).some(k => k.Frame >= startFrame && k.Frame <= endFrame);
-      const hasScaleInSeq = (node.Scaling?.Keys || []).some(k => k.Frame >= startFrame && k.Frame <= endFrame);
+      const hasTransInSeq = (node.Translation?.Keys || []).some(k => k.Frame >= startFrame && k.Frame < endFrame);
+      const hasRotInSeq = (node.Rotation?.Keys || []).some(k => k.Frame >= startFrame && k.Frame < endFrame);
+      const hasScaleInSeq = (node.Scaling?.Keys || []).some(k => k.Frame >= startFrame && k.Frame < endFrame);
 
       if (hasTransInSeq || hasRotInSeq) {
         const inputAcc = doc.createAccessor().setArray(new Float32Array(times)).setType('SCALAR').setBuffer(buffer);
@@ -444,6 +486,12 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
         const s = alpha > VIS_ALPHA_EPS ? 1 : 0;
         geoScales.push(s, s, s);
       }
+      // Same seamless-loop fix: force the last geoset visibility state to match frame 0.
+      if (frames.length > 1 && geoScales.length >= 3) {
+        geoScales[geoScales.length - 3 + 0] = geoScales[0];
+        geoScales[geoScales.length - 3 + 1] = geoScales[1];
+        geoScales[geoScales.length - 3 + 2] = geoScales[2];
+      }
       let allOne = true;
       for (let k = 0; k < geoScales.length; k++) {
         if (geoScales[k] !== 1) {
@@ -470,6 +518,10 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
 
 /** Main */
 async function main() {
+  const onlyIdx = process.argv.indexOf('--only');
+  const onlyId = onlyIdx >= 0 ? process.argv[onlyIdx + 1] : null;
+  const noManifest = process.argv.includes('--no-manifest');
+
   if (!fs.existsSync(WC3_MODELS)) {
     fs.mkdirSync(WC3_MODELS, { recursive: true });
     console.log('Created WarcraftModels/ (empty). Add MDX files and run again.');
@@ -480,15 +532,45 @@ async function main() {
   if (!fs.existsSync(MODELS_OUT)) fs.mkdirSync(MODELS_OUT, { recursive: true });
 
   const mdxFiles = [];
+  let foundOnly = null;
   function scan(dir) {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const e of entries) {
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) scan(full);
-      else if (e.name.toLowerCase().endsWith('.mdx')) mdxFiles.push(full);
+      if (e.isDirectory()) {
+        if (onlyId && foundOnly) return;
+        scan(full);
+      } else if (e.name.toLowerCase().endsWith('.mdx')) {
+        const basename = path.basename(e.name, '.mdx');
+        if (onlyId) {
+          if (basename === onlyId) {
+            foundOnly = full;
+            return;
+          }
+        } else {
+          mdxFiles.push(full);
+        }
+      }
     }
   }
   scan(WC3_MODELS);
+
+  // Fast path: convert a single model and exit (optionally without touching manifest.json).
+  if (onlyId) {
+    if (!foundOnly) {
+      console.error(`No MDX found for id: ${onlyId}`);
+      process.exit(1);
+    }
+    const mdxPath = foundOnly;
+    const basename = path.basename(mdxPath, '.mdx');
+    const modelDir = path.dirname(mdxPath);
+    const glbName = basename + '.glb';
+    const outPath = path.join(MODELS_OUT, glbName);
+    await convertMdxToGlb(mdxPath, outPath, modelDir);
+    console.log(`Converted ${basename} -> ${path.relative(ROOT, outPath)}`);
+    // Intentionally does not rewrite manifest.json (unless you re-run the full script).
+    return;
+  }
 
   const manifest = [];
   for (let i = 0; i < mdxFiles.length; i++) {

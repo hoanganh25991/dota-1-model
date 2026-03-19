@@ -172,6 +172,14 @@ function playClipAtIndex(clips, index) {
   action.clampWhenFinished = false;
   action.enabled = true;
   action.play();
+
+  const animationSel = document.getElementById('animation-select');
+  if (animationSel) animationSel.value = String(index);
+
+  // Keep desktop button highlight in sync (even if hidden on mobile).
+  document.querySelectorAll('#animation-buttons .animation-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.index === String(index));
+  });
 }
 
 function escapeHtml(s) {
@@ -445,7 +453,6 @@ function loadModel(id) {
 
       if (currentClips.length > 0) {
         playClipAtIndex(currentClips, 0);
-        document.querySelector('#animation-buttons .animation-btn')?.classList.add('active');
       }
       // Geoset hide/show + bones: must run before bounding box / centering
       if (typeof mixer.setTime === 'function') mixer.setTime(0);
@@ -454,6 +461,8 @@ function loadModel(id) {
       currentModel.updateMatrixWorld(true);
 
       frameModelAndCamera(currentModel);
+      const viewSel = document.getElementById('view-select');
+      if (viewSel) viewSel.value = 'front';
       controls.saveState();
     },
     undefined,
@@ -463,6 +472,7 @@ function loadModel(id) {
 
 function clearCurrentModel() {
   currentClips = [];
+  renderAnimationButtons(currentClips);
   if (mixer) {
     mixer.stopAllAction();
     mixer.uncacheRoot(currentModel);
@@ -483,27 +493,41 @@ function clearCurrentModel() {
 
 function renderAnimationButtons(clips) {
   const container = document.getElementById('animation-buttons');
+  const animationSel = document.getElementById('animation-select');
+
   if (clips.length === 0) {
-    container.innerHTML = '<p style="color:#666;font-size:12px;">No animations</p>';
+    if (container) container.innerHTML = '<p style="color:#666;font-size:12px;">No animations</p>';
+    if (animationSel) {
+      animationSel.innerHTML = '<option value="" disabled selected>No animations</option>';
+      animationSel.disabled = true;
+    }
     return;
   }
 
-  container.innerHTML = clips
-    .map(
-      (clip, i) =>
-        `<button class="animation-btn" data-index="${i}">${escapeHtml(clip.name || `Anim ${i}`)}</button>`
-    )
-    .join('');
+  if (container) {
+    container.innerHTML = clips
+      .map(
+        (clip, i) =>
+          `<button class="animation-btn" data-index="${i}">${escapeHtml(clip.name || `Anim ${i}`)}</button>`
+      )
+      .join('');
 
-  container.querySelectorAll('.animation-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      if (!mixer || !currentModel) return;
-      const idx = parseInt(btn.dataset.index, 10);
-      playClipAtIndex(clips, idx);
-      mixer.update(0);
-      container.querySelectorAll('.animation-btn').forEach((b) => b.classList.toggle('active', b.dataset.index === btn.dataset.index));
+    container.querySelectorAll('.animation-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (!mixer || !currentModel) return;
+        const idx = parseInt(btn.dataset.index, 10);
+        playClipAtIndex(clips, idx);
+        mixer.update(0);
+      });
     });
-  });
+  }
+
+  if (animationSel) {
+    animationSel.disabled = false;
+    animationSel.innerHTML = clips
+      .map((clip, i) => `<option value="${i}">${escapeHtml(clip.name || `Anim ${i}`)}</option>`)
+      .join('');
+  }
 }
 
 function animate() {
@@ -512,6 +536,35 @@ function animate() {
   if (mixer) mixer.update(delta * animationSpeed * MDX_ANIM_BASE_SCALE);
   controls.update();
   renderer.render(scene, camera);
+}
+
+function applyViewPreset(preset) {
+  const d = modelFrameDistance || 8;
+  if (!controls) return;
+
+  if (preset === 'reset') {
+    controls.reset();
+    return;
+  }
+
+  if (preset === 'front') {
+    const baseX = 0;
+    const baseZ = d * 0.92;
+    const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
+    camera.position.set(r.x, d * 0.38, r.z);
+    controls.target.set(0, 0, 0);
+    controls.update();
+    return;
+  }
+
+  if (preset === 'side') {
+    const baseX = d * 0.95;
+    const baseZ = d * 0.12;
+    const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
+    camera.position.set(r.x, d * 0.35, r.z);
+    controls.target.set(0, 0, 0);
+    controls.update();
+  }
 }
 
 function setupUI() {
@@ -523,29 +576,16 @@ function setupUI() {
 
   window.addEventListener('popstate', () => syncFromUrl());
 
-  document.getElementById('btn-reset').addEventListener('click', () => {
-    controls.reset();
-  });
+  document.getElementById('btn-reset').addEventListener('click', () => applyViewPreset('reset'));
+  document.getElementById('btn-front').addEventListener('click', () => applyViewPreset('front'));
+  document.getElementById('btn-side').addEventListener('click', () => applyViewPreset('side'));
 
-  document.getElementById('btn-front').addEventListener('click', () => {
-    const d = modelFrameDistance || 8;
-    const baseX = 0;
-    const baseZ = d * 0.92;
-    const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
-    camera.position.set(r.x, d * 0.38, r.z);
-    controls.target.set(0, 0, 0);
-    controls.update();
-  });
-
-  document.getElementById('btn-side').addEventListener('click', () => {
-    const d = modelFrameDistance || 8;
-    const baseX = d * 0.95;
-    const baseZ = d * 0.12;
-    const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
-    camera.position.set(r.x, d * 0.35, r.z);
-    controls.target.set(0, 0, 0);
-    controls.update();
-  });
+  const viewSel = document.getElementById('view-select');
+  if (viewSel) {
+    viewSel.addEventListener('change', (e) => {
+      applyViewPreset(e.target.value);
+    });
+  }
 
   document.getElementById('speed-slider').addEventListener('input', (e) => {
     animationSpeed = parseFloat(e.target.value);
@@ -555,6 +595,22 @@ function setupUI() {
   document.getElementById('btn-light-default').addEventListener('click', () => setLightPreset('default'));
   document.getElementById('btn-light-dark').addEventListener('click', () => setLightPreset('dark'));
   document.getElementById('btn-light-bright').addEventListener('click', () => setLightPreset('bright'));
+
+  const lightingSel = document.getElementById('lighting-select');
+  if (lightingSel) {
+    lightingSel.addEventListener('change', (e) => setLightPreset(e.target.value));
+  }
+
+  const animationSel = document.getElementById('animation-select');
+  if (animationSel) {
+    animationSel.addEventListener('change', (e) => {
+      if (!mixer || !currentModel) return;
+      const idx = parseInt(e.target.value, 10);
+      if (Number.isNaN(idx)) return;
+      playClipAtIndex(currentClips, idx);
+      mixer.update(0);
+    });
+  }
 }
 
 function setLightPreset(name) {
@@ -563,6 +619,9 @@ function setLightPreset(name) {
   ambientLight.intensity = p.ambient;
   directionalLight.intensity = p.directional;
   document.querySelectorAll('#controls button[id^="btn-light"]').forEach((b) => b.classList.toggle('active', b.id === `btn-light-${name}`));
+
+  const lightingSel = document.getElementById('lighting-select');
+  if (lightingSel) lightingSel.value = name;
 }
 
 async function main() {
