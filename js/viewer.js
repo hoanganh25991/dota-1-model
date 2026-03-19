@@ -33,7 +33,7 @@ const MDX_ANIM_BASE_SCALE = 25;
 const WC3_Z_UP_TO_Y_UP = -Math.PI / 2; // rotate around X
 
 /** Fixed yaw offset so the initial view looks at the model's "front". */
-const CAMERA_YAW_CORRECTION = -Math.PI / 2; // rotate around Y (right -> left)
+const CAMERA_YAW_CORRECTION = Math.PI / 2; // rotate around Y (left -> right)
 
 function rotateAroundY(x, z, yaw) {
   const cos = Math.cos(yaw);
