@@ -1,6 +1,16 @@
 # MDX -> GLB Extraction Spec (`scripts/generate-model-manifest.mjs`)
 
-This document specifies how this repo converts **Warcraft 3 MDX** + **BLP textures** into **GLB** files and `WarcraftModels/manifest.json`.
+This document specifies how this repo converts **Warcraft 3 MDX** + **texture files on disk** into **GLB** files and `WarcraftModels/manifest.json`. It is meant to stay aligned with `scripts/generate-model-manifest.mjs` so nothing important is missed when reimplementing or auditing the pipeline.
+
+## MDX vs BLP (and other textures): what you need when
+
+| Phase | What you need | Why |
+| ----- | --------------- | --- |
+| **Authoring / conversion** | **MDX** + **texture files** that the MDX references | The MDX stores **paths** to textures (`model.Textures[].Image`, used by material layers). It does **not** embed full bitmap payloads for typical WC3 assets. The script **reads** `.blp` (or `.png`/`.jpg`/`.jpeg`) from disk at those paths, decodes them, and embeds **PNG bytes** inside the glTF. |
+| **After the GLB exists** | **Only the GLB** (and manifest for this app) | The exported GLB is **self-contained** for textures: images are stored as glTF images (PNG). The browser **does not** load `.blp` at runtime. |
+| **If a referenced file is missing** | — | That material layer cannot be used; the script skips unresolved layers. End state can be: another layer wins, **fallback** texture (see below), or **no texture** → `alphaClamped = 0` → hidden geoset. |
+
+**Summary:** Keep **BLP (or equivalent images)** in `WarcraftModels/` (or paths resolvable by `resolveTexturePath`) **while converting**. “MDX alone” is enough for geometry and animation data, but **not** for correct albedo unless every referenced texture file is present or you accept fallbacks / hidden materials.
 
 ## High-level responsibilities
 The script is responsible for:
@@ -10,7 +20,7 @@ The script is responsible for:
    2. Export a skeleton (bones + helpers as glTF nodes)
    3. Export skinning (vertex groups -> joints/weights)
    4. Export animation clips (MDX Sequences -> glTF animations)
-   5. Export materials with BLP texture conversion (BLP -> PNG -> glTF textures)
+   5. Export materials with texture conversion (BLP → PNG, or raw PNG/JPEG bytes → glTF textures)
 3. Writing `WarcraftModels/manifest.json` (model list + category + display names)
 
 ## Entry points (CLI)
@@ -61,11 +71,18 @@ After a full scan:
 
 ## Folder layout expectations
 The script assumes:
-- Source MDX files exist under `WarcraftModels/`
-- Converted GLBs are placed into `models/`
+- Source MDX files exist under `WarcraftModels/` (may live in subfolders; scan is recursive)
+- `ROOT` = repo root; `WC3_MODELS = <ROOT>/WarcraftModels`; `MODELS_OUT = <ROOT>/models`
+- Converted GLBs are written to `models/<basename>.glb`
 - Texture resolution is performed by searching:
-  - relative to the MDX folder
-  - and within `WarcraftModels/`
+  - relative to the MDX’s folder (`modelDir`)
+  - and within `WarcraftModels/` (full normalized path)
+  - and `WarcraftModels/<basename(Image)>` (flat fallback when subfolders differ)
+
+## Dependencies (npm)
+- `war3-model`: `parseMDX`, `decodeBLP`, `getBLPImageData`
+- `upng-js`: encode RGBA → PNG for glTF `image/png` payloads
+- `@gltf-transform/core`: `Document`, `NodeIO` — build glTF and write `.glb`
 
 ## Core constants
 
@@ -125,34 +142,40 @@ Steps:
    - Count pixels where alpha < 255
    - Transparency is considered present if:
      `transparentCount >= ceil(totalPixels * TEXTURE_TRANSPARENT_RATIO_THRESHOLD)`
-5. Encode PNG using `upng-js`
+5. Encode PNG using `upng-js` (pass a **sliced** RGBA buffer: `data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)` so the encoder sees exactly one image’s bytes)
 6. Return:
    - `{ pngBytes: Buffer.from(png), hasAlpha: boolean }`
+7. On any throw/decode failure: returns `null` (that layer is not usable)
 
 ### Non-BLP images
-If an MDX layer references `.png` / `.jpg` / `.jpeg`, the script reads bytes directly and uses them as an image payload.
+If an MDX layer references `.png` / `.jpg` / `.jpeg`, the script reads file bytes with `fs.readFileSync` and assigns `imgHasAlpha = false` for cache purposes (alpha mode then follows `alphaClamped` only, unless BLP path set `hasAlpha`).
 
 ## Material export
 
 For each `model.Materials[]` entry:
 1. Iterate its `layers = mat.Layers || []`
-2. Select the first layer whose:
-   - resolves to an existing file
-   - and is decodable/convertible into `imgBytes`
-   - and is a usable texture type (BLP or image extension supported)
-3. Also compute:
-   - `doubleSided` if any layer has `layer.Shading & LAYER_TWO_SIDED`
-
-### Replaceable texture skip rule
-The converter treats replaceable slots (e.g. team colors / variants) carefully:
-- If `texEntry.Image` is missing and `texEntry.ReplaceableId > 0`, that layer is skipped
-- If `texEntry.Image` is missing and `ReplaceableId === 0`, that layer is effectively ignored by the “resolved texture” requirement
+2. While iterating:
+   - If `layer.Shading & LAYER_TWO_SIDED`: set `doubleSided = true` for the whole material (any layer can flip this)
+3. For each layer, read `texEntry = model.Textures[layer.TextureID]` (default index `0` if missing)
+4. Let `texPath = texEntry.Image` trimmed, or empty
+5. **If `texPath` is empty:**
+   - If `layer.Alpha` is a number, update working `alpha` (so replaceable-only layers can still contribute alpha before fallback)
+   - If `texEntry.ReplaceableId > 0`: **continue** (skip this layer; do not invent a texture)
+   - Else: **continue** (no image path)
+6. **Else** (`texPath` non-empty):
+   - `resolved = resolveTexturePath(modelDir, texPath)` — if null, continue
+   - By extension:
+     - `.blp` → `blpToPngBytes(resolved)`; if null, continue
+     - `.png`/`.jpg`/`.jpeg` → read bytes; `imgHasAlpha` stays false for cache
+   - **Texture cache:** key = resolved filesystem path string. Value = `{ texture, hasAlpha }`. Reuse if key already present.
+   - Set `tex`, `textureHasAlpha`, `selectedLayer`, and `alpha` from the chosen layer; **break** (first winning layer wins)
 
 ### Alpha and alphaMode export rules
 
 The base material alpha uses:
-- `alphaClamped = clamp(layer.Alpha, 0..1)`
-- If no texture was resolved for the material, it forces `alphaClamped = 0` (geometry hidden)
+- A working `alpha` (default `1`), updated when a layer has no `Image` but has numeric `layer.Alpha`, and when a concrete layer is selected
+- `alphaClamped = clamp(alpha, 0..1)`
+- If no texture was resolved for the material (even after fallback), it forces `alphaClamped = 0` (geometry hidden)
 
 Then it sets:
 - `pbr.setBaseColorFactor([1,1,1,alphaClamped])`
@@ -184,6 +207,12 @@ Then for any material where `tex` is still null:
 - it resolves this fallback texture path
 - converts it (if `.blp`) or reads bytes (if `.png/.jpg/.jpeg`)
 - uses it as the baseColorTexture
+- same texture cache rules apply
+
+### What ends up inside the GLB (textures)
+- **No `.blp` binaries** are embedded: the converter decodes BLP to RGBA, encodes **PNG**, and stores that in the glTF buffer.
+- The script always calls `setMimeType('image/png')` on `createTexture()` (including when `imgBytes` came from reading a `.png`/`.jpg`/`.jpeg` file). A stricter reimplementation should set `image/jpeg` / `image/png` from the file extension.
+- **Texture deduplication:** the same resolved path only decodes once; subsequent materials reuse the cached glTF `Texture`.
 
 ## Geometry and skinning export
 
@@ -345,4 +374,42 @@ Skip optimization:
 - If `models/<basename>.glb` already exists:
   - it does not reconvert
   - but still includes the entry in the manifest
+
+### Failure handling (batch mode)
+- Each `convertMdxToGlb` call is wrapped in `try/catch`.
+- On failure: logs `Failed <basename>: <message>` to stderr; that model is **not** added to the manifest array for that run (entries already skipped due to existing GLB are still pushed).
+
+### Empty `WarcraftModels/`
+- If the directory does not exist, it is created and an **empty** `manifest.json` is written (`{ "models": [] }`), then the script exits early.
+
+## MDX parse and GLB write
+
+### `parseMDX`
+- Input: `fs.readFileSync(mdxPath)` → `parseMDX(buf.buffer)` from `war3-model`.
+- On parse error: throws; caught in `main` for batch mode.
+
+### GLB serialization
+- `const io = new NodeIO(); await io.write(outPath, doc);`
+- Writes a standard binary glTF (`.glb`) containing the built `Document`.
+
+## Implementation map (functions in `generate-model-manifest.mjs`)
+
+| Symbol | Role |
+| ------ | ---- |
+| `inferCategory`, `formatName` | Manifest metadata |
+| `resolveTexturePath` | Locate texture files on disk |
+| `blpToPngBytes` | BLP → PNG + `hasAlpha` flag |
+| `sampleAnimVector` | Keyframe sampling inside a sequence window |
+| `sampleGeosetAlphaAtFrame`, `mapGeosetAnimsByGeosetId` | Geoset visibility animation |
+| `findFallbackTextureImage` | First non-replaceable texture path for fallback |
+| `rotateByQuat`, `wc3TrsToGltf` | WC3 bone TRS → glTF node TRS |
+| `collectNodes` | Bone/helper hierarchy flattening |
+| `buildSkinData` | Geoset → `JOINTS_0` / `WEIGHTS_0` |
+| `convertMdxToGlb` | Full MDX → glTF document → `.glb` |
+| `main` | CLI, scan, batch / `--only`, manifest |
+| `writeManifest` | `JSON.stringify` to `WarcraftModels/manifest.json` |
+
+## Related docs
+- Runtime (load GLB, camera, playback): [`VIEWER_RUNTIME_SPEC.md`](VIEWER_RUNTIME_SPEC.md)
+- Index: [`SPEC_INDEX.md`](SPEC_INDEX.md)
 
