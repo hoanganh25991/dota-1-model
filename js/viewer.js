@@ -20,6 +20,8 @@ let filteredModels = [];
 let activeCategory = 'all';
 let searchQuery = '';
 let animationSpeed = 1;
+/** When true, skip updating the address bar (initial load / popstate sync). */
+let applyingUrlQuery = false;
 
 /** MDX timelines are long in wall-clock seconds; ~25× matches typical WC3 in-engine speed at slider 1×. */
 const MDX_ANIM_BASE_SCALE = 25;
@@ -160,6 +162,91 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+function escapeAttr(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+}
+
+function readUrlQuery() {
+  const p = new URLSearchParams(window.location.search);
+  return {
+    categoryParam: p.get('category'),
+    modelParam: p.get('model'),
+  };
+}
+
+function resolveCategoryFromParam(param) {
+  if (!param) return 'all';
+  const lower = param.toLowerCase();
+  const found = getCategories().find((c) => c.toLowerCase() === lower);
+  return found || 'all';
+}
+
+function modelMatchesActiveCategory(m) {
+  return activeCategory === 'all' || m.category === activeCategory;
+}
+
+/** Sync ?category= (lowercase) and optional &model= (manifest id). */
+function writeUrlQuery(modelId) {
+  if (applyingUrlQuery) return;
+  const u = new URL(window.location.href);
+  if (activeCategory === 'all' && !modelId) {
+    u.searchParams.delete('category');
+    u.searchParams.delete('model');
+  } else {
+    u.searchParams.set('category', activeCategory === 'all' ? 'all' : activeCategory.toLowerCase());
+    if (modelId) u.searchParams.set('model', modelId);
+    else u.searchParams.delete('model');
+  }
+  const next = `${u.pathname}${u.search}${u.hash}`;
+  if (next !== `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+    history.replaceState(null, '', next);
+  }
+}
+
+function clearViewerSelection() {
+  clearCurrentModel();
+  document.getElementById('current-model').textContent = 'Select a model';
+  document.querySelectorAll('.model-item').forEach((el) => el.classList.remove('active'));
+  const modelSel = document.getElementById('model-select');
+  if (modelSel) modelSel.value = '';
+}
+
+function onCategorySelectChange(e) {
+  activeCategory = e.target.value;
+  clearViewerSelection();
+  renderModelList();
+  renderModelSelect();
+  writeUrlQuery(null);
+}
+
+function onModelSelectChange(e) {
+  const id = e.target.value;
+  if (!id) {
+    clearViewerSelection();
+    writeUrlQuery(null);
+    return;
+  }
+  loadModel(id);
+}
+
+function renderModelSelect() {
+  const sel = document.getElementById('model-select');
+  if (!sel) return;
+  const prev = sel.value;
+  sel.innerHTML = '';
+  const ph = document.createElement('option');
+  ph.value = '';
+  ph.textContent = '— Select model —';
+  sel.appendChild(ph);
+  for (const m of filteredModels) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.name;
+    sel.appendChild(opt);
+  }
+  if (prev && filteredModels.some((x) => x.id === prev)) sel.value = prev;
+}
+
 /** Max axis scale from world matrix (detects geoset nodes scaled to 0 for hide). */
 function maxWorldAxisScale(matrixWorld) {
   _mxCol0.setFromMatrixColumn(matrixWorld, 0);
@@ -219,14 +306,17 @@ function frameModelAndCamera(root) {
   root.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
   root.updateMatrixWorld(true);
 
-  const box2 = new THREE.Box3().setFromObject(root);
+  const box2 = new THREE.Box3();
+  computeVisibleMeshesWorldBox(root, box2);
+  if (box2.isEmpty()) box2.setFromObject(root);
   const center2 = box2.getCenter(new THREE.Vector3());
   root.position.sub(center2);
   root.updateMatrixWorld(true);
 
-  const boxVis = new THREE.Box3();
-  computeVisibleMeshesWorldBox(root, boxVis);
-  const size2 = boxVis.isEmpty() ? box2.getSize(new THREE.Vector3()) : boxVis.getSize(new THREE.Vector3());
+  const box3 = new THREE.Box3();
+  computeVisibleMeshesWorldBox(root, box3);
+  if (box3.isEmpty()) box3.setFromObject(root);
+  const size2 = box3.getSize(new THREE.Vector3());
   const maxDim2 = Math.max(size2.x, size2.y, size2.z, maxDim * scale, 0.001);
 
   const vFov = (camera.fov * Math.PI) / 180;
@@ -235,6 +325,7 @@ function frameModelAndCamera(root) {
   const distH = maxDim2 / 2 / Math.tan(hFov / 2);
   const dist = Math.max(distV, distH, 1.5) * 1.15;
   modelFrameDistance = dist;
+  controls.maxDistance = Math.max(controls.maxDistance, dist * 4);
 
   // Front-quarter (Y-up): mostly +Z toward model, moderate elevation — avoids “top-down” feel.
   const dir = new THREE.Vector3(0.52, 0.42, 0.74).normalize();
@@ -251,32 +342,64 @@ function getCategories() {
   return ['all', ...Array.from(cats).sort()];
 }
 
-function renderCategoryFilter() {
+function renderCategorySelect() {
   const container = document.getElementById('category-filter');
   const categories = getCategories();
-  container.innerHTML = categories
-    .map(
-      (c) =>
-        `<button class="category-btn ${c === activeCategory ? 'active' : ''}" data-cat="${c}">${c === 'all' ? 'All' : c}</button>`
-    )
-    .join('');
+  container.innerHTML = `
+    <div class="filter-row">
+      <label for="category-select">Type</label>
+      <select id="category-select">
+        ${categories
+          .map(
+            (c) =>
+              `<option value="${escapeAttr(c)}">${c === 'all' ? 'All' : escapeHtml(c)}</option>`
+          )
+          .join('')}
+      </select>
+    </div>
+    <div class="filter-row">
+      <label for="model-select">Model</label>
+      <select id="model-select"></select>
+    </div>
+  `;
+  const catSel = document.getElementById('category-select');
+  catSel.value = activeCategory;
+  catSel.addEventListener('change', onCategorySelectChange);
+  document.getElementById('model-select').addEventListener('change', onModelSelectChange);
+}
 
-  container.querySelectorAll('.category-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      activeCategory = btn.dataset.cat;
-      container.querySelectorAll('.category-btn').forEach((b) => b.classList.toggle('active', b.dataset.cat === activeCategory));
-      renderModelList();
-    });
-  });
+function syncFromUrl() {
+  applyingUrlQuery = true;
+  const { categoryParam, modelParam } = readUrlQuery();
+  activeCategory = resolveCategoryFromParam(categoryParam);
+  const catSel = document.getElementById('category-select');
+  if (catSel) catSel.value = activeCategory;
+  renderModelList();
+  renderModelSelect();
+  if (modelParam) {
+    const m = allModels.find((x) => x.id === modelParam);
+    if (m && modelMatchesActiveCategory(m)) {
+      loadModel(modelParam);
+    } else {
+      clearViewerSelection();
+    }
+  } else {
+    clearViewerSelection();
+  }
+  applyingUrlQuery = false;
 }
 
 function loadModel(id) {
   const model = allModels.find((m) => m.id === id);
   if (!model) return;
 
+  writeUrlQuery(id);
+
   clearCurrentModel();
   document.getElementById('current-model').textContent = model.name;
   document.querySelectorAll('.model-item').forEach((el) => el.classList.toggle('active', el.dataset.id === id));
+  const modelSel = document.getElementById('model-select');
+  if (modelSel && filteredModels.some((x) => x.id === id)) modelSel.value = id;
 
   const loader = new GLTFLoader();
   loader.load(
@@ -371,7 +494,10 @@ function setupUI() {
   document.getElementById('search-input').addEventListener('input', (e) => {
     searchQuery = e.target.value;
     renderModelList();
+    renderModelSelect();
   });
+
+  window.addEventListener('popstate', () => syncFromUrl());
 
   document.getElementById('btn-reset').addEventListener('click', () => {
     controls.reset();
@@ -415,8 +541,17 @@ async function main() {
 
   try {
     await loadManifest();
-    renderCategoryFilter();
+    applyingUrlQuery = true;
+    const { categoryParam, modelParam } = readUrlQuery();
+    activeCategory = resolveCategoryFromParam(categoryParam);
+    renderCategorySelect();
     renderModelList();
+    renderModelSelect();
+    if (modelParam) {
+      const m = allModels.find((x) => x.id === modelParam);
+      if (m && modelMatchesActiveCategory(m)) loadModel(modelParam);
+    }
+    applyingUrlQuery = false;
   } catch (e) {
     document.getElementById('model-count').textContent = 'Failed to load manifest';
     document.getElementById('model-list').innerHTML = '<p style="color:#666;padding:15px;">Run: node scripts/generate-model-manifest.mjs</p>';

@@ -37,7 +37,8 @@ dota-1-model/
 ## Features
 
 - **3055 models** searchable by name
-- **Category filter**: Unit, Hero, Portrait, Effect, Particle, Blood, Spirit, Cinematic
+- **Type & model selects**: Filter by category, then pick a model (same as the list below)
+- **Shareable URL**: `?category=unit` for type only; `?category=unit&model=Abomination` for a specific model (`category` is lowercase; `model` is the manifest id)
 - **Search**: Filter by name across all models
 - **3D viewer** with orbit controls (drag/zoom/pan)
 - **Animation buttons**: Stand, Walk, Attack, Death, Spell (currently procedural; see [docs/ANIMATIONS.md](docs/ANIMATIONS.md) for real WC3 animation support)
