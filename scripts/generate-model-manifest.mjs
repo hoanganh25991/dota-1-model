@@ -19,6 +19,8 @@ const MODELS_OUT = path.join(ROOT, 'models');
 const WC3_FPS = 30; // Warcraft 3 model animation frame rate
 /** MDX layer shading: TwoSided */
 const LAYER_TWO_SIDED = 16;
+/** If a texture has lots of transparent pixels, `OPAQUE` ignores its alpha and can cause artifacts. */
+const TEXTURE_TRANSPARENT_RATIO_THRESHOLD = 0.01; // 1% pixels with alpha < 255
 
 /** Infer category from filename */
 function inferCategory(basename) {
@@ -63,8 +65,21 @@ function blpToPngBytes(blpPath) {
     const blp = decodeBLP(buf.buffer);
     const imgData = getBLPImageData(blp, 0);
     const { width, height, data } = imgData;
+    // Decide whether the texture contains transparency.
+    // If we later mark the glTF material as `OPAQUE`, the texture alpha gets ignored,
+    // which can produce visible "square" artifacts around geosets that use masked edges.
+    const totalPixels = data.length / 4;
+    const transparentThreshold = Math.max(1, Math.ceil(totalPixels * TEXTURE_TRANSPARENT_RATIO_THRESHOLD));
+    let transparentCount = 0;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) {
+        transparentCount++;
+        if (transparentCount >= transparentThreshold) break;
+      }
+    }
+    const hasAlpha = transparentCount >= transparentThreshold;
     const png = UPNG.encode([data.buffer], width, height, 0);
-    return Buffer.from(png);
+    return { pngBytes: Buffer.from(png), hasAlpha };
   } catch (e) {
     return null;
   }
@@ -297,6 +312,7 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
     // Some WC3 materials store the visible base texture in layer[1..], while layer[0]
     // can be a replaceable texture (missing Image) -> would render as white otherwise.
     let tex = null;
+    let textureHasAlpha = false;
     let selectedLayer = null;
     let alpha = 1;
     let doubleSided = false;
@@ -319,8 +335,12 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
 
       const ext = path.extname(resolved).toLowerCase();
       let imgBytes = null;
+      let imgHasAlpha = false;
       if (ext === '.blp') {
-        imgBytes = blpToPngBytes(resolved);
+        const converted = blpToPngBytes(resolved);
+        if (!converted) continue;
+        imgBytes = converted.pngBytes;
+        imgHasAlpha = converted.hasAlpha;
       } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
         imgBytes = fs.readFileSync(resolved);
       }
@@ -329,9 +349,10 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
       const cacheKey = resolved;
       if (!textureCache.has(cacheKey)) {
         const texture = doc.createTexture().setImage(imgBytes).setMimeType('image/png');
-        textureCache.set(cacheKey, texture);
+        textureCache.set(cacheKey, { texture, hasAlpha: imgHasAlpha });
       }
-      tex = textureCache.get(cacheKey);
+      tex = textureCache.get(cacheKey).texture;
+      textureHasAlpha = textureCache.get(cacheKey).hasAlpha;
       selectedLayer = layer;
       alpha = typeof layer?.Alpha === 'number' ? layer.Alpha : alpha;
       break;
@@ -344,7 +365,10 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
     const pbr = doc.createMaterial().setBaseColorFactor([1, 1, 1, alphaClamped]);
     if (tex) pbr.setBaseColorTexture(tex);
     if (doubleSided) pbr.setDoubleSided(true);
-    pbr.setAlphaMode(alphaClamped < 1 ? 'BLEND' : 'OPAQUE');
+    // If the texture contains transparent pixels, we must use BLEND even when the
+    // layer alpha factor is 1; otherwise the texture alpha is ignored (`OPAQUE`),
+    // producing visible "square" artifacts.
+    pbr.setAlphaMode(alphaClamped < 1 || textureHasAlpha ? 'BLEND' : 'OPAQUE');
     materials.push(pbr);
   }
 

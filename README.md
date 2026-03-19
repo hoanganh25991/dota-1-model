@@ -5,11 +5,14 @@ A Three.js browser for viewing Warcraft 3 MDX models.
 ## Quick Start
 
 ```bash
-cd /Users/anhle/work-station/dota-1-model
-python -m http.server 8000
+cd dota-1-model && python -m http.server 8000
+open http://localhost:8000
 ```
 
-Open `http://localhost:8000`
+### Review Models
+
+
+
 
 ## Project Structure
 
@@ -54,6 +57,7 @@ node scripts/generate-model-manifest.mjs
 ```
 
 This will:
+
 1. Scan for new MDX files
 2. Convert them to GLB in `models/` (skips MDX when `models/<name>.glb` already exists — delete a GLB to force reconvert). **Reconvert** after pipeline fixes (e.g. animation timing): animations use clip-relative times so Walk / Stand play correctly in Three.js.
 3. Update `manifest.json`
@@ -61,19 +65,23 @@ This will:
 ## Model Names
 
 Names are formatted for readability:
+
 - `AncestralGuardian` → "Ancestral Guardian"
 - `HeroDreadLord` → "Hero Dread Lord"
 - `V2` → " v2"
 
 ## Categories
 
-| Category | Description |
-|---------|-------------|
-| Unit | Base units, buildings, troops |
-| Hero | Hero models |
-| Portrait | UI portraits |
-| Effect | Spell effects, missiles |
-| Particle | Fire, smoke, dust, fog |
-| Blood | Blood splats and effects |
-| Spirit | Ghosts and spirits |
-| Cinematic | Camera and cinematic models |
+
+| Category  | Description                   |
+| --------- | ----------------------------- |
+| Unit      | Base units, buildings, troops |
+| Hero      | Hero models                   |
+| Portrait  | UI portraits                  |
+| Effect    | Spell effects, missiles       |
+| Particle  | Fire, smoke, dust, fog        |
+| Blood     | Blood splats and effects      |
+| Spirit    | Ghosts and spirits            |
+| Cinematic | Camera and cinematic models   |
+
+

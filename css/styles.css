@@ -510,3 +510,58 @@ input[type="range"] {
         text-align: center;
     }
 }
+
+/* Landscape override: keep a horizontal, desktop-like layout so the right controls remain sticky. */
+@media (orientation: landscape) and (max-width: 900px) {
+    body {
+        overflow: hidden;
+    }
+
+    #sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 260px;
+        height: 100vh;
+        border-right: 1px solid rgba(0, 255, 136, 0.2);
+        border-bottom: none;
+        z-index: 200;
+        display: flex;
+        flex-direction: column;
+    }
+
+    #header {
+        position: fixed;
+        top: 0;
+        left: 260px;
+        right: 240px;
+        z-index: 100;
+        pointer-events: none;
+    }
+
+    #viewer {
+        position: fixed;
+        top: 0;
+        left: 260px;
+        right: 240px;
+        bottom: 0;
+        height: auto;
+    }
+
+    #controls {
+        position: fixed;
+        top: 0;
+        left: auto;
+        right: 0;
+        bottom: 0;
+        width: 240px;
+        height: 100vh;
+        max-height: none;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 20px;
+        border-left: 1px solid rgba(0, 255, 136, 0.2);
+        border-top: none;
+        z-index: 250;
+    }
+}
