@@ -21,6 +21,8 @@ const WC3_FPS = 30; // Warcraft 3 model animation frame rate
 const LAYER_TWO_SIDED = 16;
 /** If a texture has lots of transparent pixels, `OPAQUE` ignores its alpha and can cause artifacts. */
 const TEXTURE_TRANSPARENT_RATIO_THRESHOLD = 0.01; // 1% pixels with alpha < 255
+/** For `alphaMode='MASK'`: discard pixels with alpha below this threshold. */
+const TEXTURE_ALPHA_CUTOFF = 0.01; // ~2/255
 
 /** Infer category from filename */
 function inferCategory(basename) {
@@ -62,7 +64,10 @@ function resolveTexturePath(modelDir, texPath) {
 function blpToPngBytes(blpPath) {
   try {
     const buf = fs.readFileSync(blpPath);
-    const blp = decodeBLP(buf.buffer);
+    // Important: `buf.buffer` is the underlying ArrayBuffer and may include extra bytes.
+    // Slice to the actual file range so `decodeBLP()` always sees the correct header/payload.
+    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    const blp = decodeBLP(ab);
     const imgData = getBLPImageData(blp, 0);
     const { width, height, data } = imgData;
     // Decide whether the texture contains transparency.
@@ -78,7 +83,8 @@ function blpToPngBytes(blpPath) {
       }
     }
     const hasAlpha = transparentCount >= transparentThreshold;
-    const png = UPNG.encode([data.buffer], width, height, 0);
+    const rgbaBytes = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    const png = UPNG.encode([rgbaBytes], width, height, 0);
     return { pngBytes: Buffer.from(png), hasAlpha };
   } catch (e) {
     return null;
@@ -305,6 +311,7 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
 
   const textureCache = new Map();
   const materials = [];
+  const fallbackTextureImage = findFallbackTextureImage(model);
   for (const mat of model.Materials || []) {
     const layers = mat.Layers || [];
 
@@ -324,11 +331,15 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
       const texEntry = model.Textures?.[texId];
 
       let texPath = texEntry?.Image && String(texEntry.Image).trim();
-      // If it's replaceable (missing Image), skip it. Otherwise we'd "invent" a
-      // texture and produce large white artifacts for effects/overlays.
-      if (!texPath && texEntry?.ReplaceableId > 0) continue;
-
-      if (!texPath) continue;
+      // Preserve layer alpha even if this specific layer doesn't have a concrete image.
+      // We'll use a fallback texture later (when we would otherwise export an invisible material).
+      if (!texPath) {
+        if (typeof layer?.Alpha === 'number') alpha = layer.Alpha;
+        // If it's replaceable (missing Image), skip it. Otherwise we'd "invent" a
+        // texture and produce large white artifacts for effects/overlays.
+        if (texEntry?.ReplaceableId > 0) continue;
+        continue;
+      }
 
       const resolved = resolveTexturePath(modelDir, texPath);
       if (!resolved) continue;
@@ -358,6 +369,38 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
       break;
     }
 
+    // If the material only referenced replaceable slots with missing `Image`,
+    // we would otherwise export an "invisible" material (no texture + alpha=0).
+    // Use a safe fallback texture from the model to avoid holes in the mesh.
+    if (!tex && fallbackTextureImage) {
+      const resolved = resolveTexturePath(modelDir, fallbackTextureImage);
+      if (resolved) {
+        const ext = path.extname(resolved).toLowerCase();
+        let imgBytes = null;
+        let imgHasAlpha = false;
+        if (ext === '.blp') {
+          const converted = blpToPngBytes(resolved);
+          if (converted) {
+            imgBytes = converted.pngBytes;
+            imgHasAlpha = converted.hasAlpha;
+          }
+        } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
+          imgBytes = fs.readFileSync(resolved);
+          imgHasAlpha = false;
+        }
+        if (imgBytes) {
+          const cacheKey = resolved;
+          if (!textureCache.has(cacheKey)) {
+            const texture = doc.createTexture().setImage(imgBytes).setMimeType('image/png');
+            textureCache.set(cacheKey, { texture, hasAlpha: imgHasAlpha });
+          }
+          tex = textureCache.get(cacheKey).texture;
+          textureHasAlpha = textureCache.get(cacheKey).hasAlpha;
+          selectedLayer = selectedLayer || { _fallback: true };
+        }
+      }
+    }
+
     let alphaClamped = Math.max(0, Math.min(1, alpha));
     // If we couldn't resolve a real texture, hide the geometry instead of rendering
     // a white/opaque fallback.
@@ -365,10 +408,16 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
     const pbr = doc.createMaterial().setBaseColorFactor([1, 1, 1, alphaClamped]);
     if (tex) pbr.setBaseColorTexture(tex);
     if (doubleSided) pbr.setDoubleSided(true);
-    // If the texture contains transparent pixels, we must use BLEND even when the
-    // layer alpha factor is 1; otherwise the texture alpha is ignored (`OPAQUE`),
-    // producing visible "square" artifacts.
-    pbr.setAlphaMode(alphaClamped < 1 || textureHasAlpha ? 'BLEND' : 'OPAQUE');
+    // `BLEND` materials are rendered with transparency which disables depth writing in
+    // most realtime engines and can make the whole model look "see-through".
+    // WC3 textures are usually cutout (alpha=0 background, alpha=255 foreground),
+    // so prefer `MASK` whenever the texture has transparency.
+    if (textureHasAlpha) {
+      pbr.setAlphaMode('MASK');
+      pbr.setAlphaCutoff(TEXTURE_ALPHA_CUTOFF);
+    } else {
+      pbr.setAlphaMode(alphaClamped < 1 ? 'BLEND' : 'OPAQUE');
+    }
     materials.push(pbr);
   }
 
