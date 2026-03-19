@@ -22,7 +22,9 @@ dota-1-model/
 ├── js/viewer.js            # Three.js application
 ├── models/                 # Converted GLB files
 ├── docs/
-│   └── ANIMATIONS.md       # How WC3 animations work and how to add them
+│   ├── SPEC_INDEX.md       # Links to MDX→GLB and viewer specs
+│   ├── MDX_TO_GLB_SPEC.md  # Converter: MDX, BLP, animations → GLB
+│   └── VIEWER_RUNTIME_SPEC.md  # Viewer: load, center, animations, speed
 ├── scripts/
 │   └── generate-model-manifest.mjs  # MDX to GLB converter
 ├── WarcraftModels/        # Source MDX files (3244 files)
@@ -43,7 +45,7 @@ dota-1-model/
 - **Shareable URL**: `?category=unit` for type only; `?category=unit&model=Abomination` for a specific model (`category` is lowercase; `model` is the manifest id)
 - **Search**: Filter by name across all models
 - **3D viewer** with orbit controls (drag/zoom/pan)
-- **Animation buttons**: Stand, Walk, Attack, Death, Spell (currently procedural; see [docs/ANIMATIONS.md](docs/ANIMATIONS.md) for real WC3 animation support)
+- **Animation buttons**: Plays clips from the GLB (WC3 sequences exported from MDX); see [docs/SPEC_INDEX.md](docs/SPEC_INDEX.md)
 - **Speed slider**: Adjust playback on top of a built-in **~25× WC3 baseline** (slider `1×` ≈ in-game speed; long clips like *Decay Flesh* may still need a higher slider value)
 - **Lighting presets**: Default, Dark, Bright
 
