@@ -414,6 +414,7 @@ input[type="range"] {
 @media (max-width: 768px) {
     body {
         overflow: auto;
+        padding-bottom: 58vh; /* room for the fixed #controls panel */
     }
 
     #header {
@@ -460,12 +461,13 @@ input[type="range"] {
     }
 
     #controls {
-        position: sticky;
+        position: fixed;
+        left: 0;
+        right: 0;
         width: 100%;
         height: auto;
-        right: auto;
-        top: 0;
-        bottom: auto;
+        top: auto;
+        bottom: 0;
         overflow-y: auto;
         max-height: 55vh;
         padding: 16px 18px;

@@ -451,7 +451,16 @@ function loadModel(id) {
           obj.frustumCulled = false;
           if (obj.material) {
             const m = Array.isArray(obj.material) ? obj.material[0] : obj.material;
-            if (m && !m.transparent) m.side = THREE.DoubleSide;
+            if (m) {
+              if (!m.transparent) {
+                // WC3 quads/geosets often rely on two-sided rendering.
+                m.side = THREE.DoubleSide;
+              } else {
+                // Avoid invisible transparent planes causing depth-fighting artifacts
+                // (common for portrait background quads that may be alpha=0).
+                m.depthWrite = false;
+              }
+            }
           }
         }
       });
