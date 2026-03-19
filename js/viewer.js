@@ -276,7 +276,8 @@ async function loadModel(modelInfo) {
             clipActions.clear();
             cached.animations.forEach((clip) => {
                 const action = mixer.clipAction(clip);
-                const isDeath = /^death$/i.test(clip.name);
+                // Some models name clips like "Death 2" or "Death - X".
+                const isDeath = /death/i.test(clip.name);
                 action.setLoop(isDeath ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
                 action.clampWhenFinished = isDeath;
                 clipActions.set(clip.name, action);
@@ -307,7 +308,7 @@ async function loadModel(modelInfo) {
             clipActions.clear();
             gltf.animations.forEach((clip) => {
                 const action = mixer.clipAction(clip);
-                const isDeath = /^death$/i.test(clip.name);
+                const isDeath = /death/i.test(clip.name);
                 action.setLoop(isDeath ? THREE.LoopOnce : THREE.LoopRepeat, Infinity);
                 action.clampWhenFinished = isDeath;
                 clipActions.set(clip.name, action);
@@ -334,11 +335,44 @@ function patchSkinnedMeshSkeleton(root) {
         if (obj.isSkinnedMesh && obj.skeleton && obj.skeleton.bones) {
             // Avoid frustum culling / bounding-sphere computations that can touch invalid bones.
             obj.frustumCulled = false;
+            // Prevent Three.js from computing bounding spheres from skinned vertices on every frame.
+            // That code path calls into SkinnedMesh vertex skinning in JS and can crash if any joint/bone mapping is off.
+            if (obj.geometry) {
+                if (!obj.geometry.boundingSphere) {
+                    obj.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 1);
+                }
+                if (!obj.geometry.boundingBox) {
+                    obj.geometry.boundingBox = new THREE.Box3(
+                        new THREE.Vector3(-1, -1, -1),
+                        new THREE.Vector3(1, 1, 1)
+                    );
+                }
+            }
             const bones = obj.skeleton.bones;
-            const fallback = bones.find((b) => b != null);
-            if (fallback) {
-                for (let i = 0; i < bones.length; i++) {
+            const fallback = bones.find((b) => b != null) || bones[0];
+
+            // If Three.js failed to create all bones referenced by the skinIndex attribute,
+            // ensure bones/boneInverses are defined up to the maximum referenced index.
+            if (fallback && obj.geometry?.attributes?.skinIndex) {
+                const skinIndexAttr = obj.geometry.attributes.skinIndex;
+                const arr = skinIndexAttr.array;
+                let maxJoint = 0;
+                for (let i = 0; i < arr.length; i++) {
+                    if (arr[i] > maxJoint) maxJoint = arr[i];
+                }
+
+                for (let i = 0; i <= maxJoint; i++) {
                     if (bones[i] == null) bones[i] = fallback;
+                }
+
+                if (obj.skeleton.boneInverses) {
+                    const inverses = obj.skeleton.boneInverses;
+                    const fallbackInv = inverses.find((m) => m != null) || inverses[0];
+                    if (fallbackInv) {
+                        for (let i = 0; i <= maxJoint; i++) {
+                            if (inverses[i] == null) inverses[i] = fallbackInv;
+                        }
+                    }
                 }
             }
         }
