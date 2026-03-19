@@ -6,11 +6,20 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { mat4, quat } from 'gl-matrix';
+import { mat4, quat, vec3 } from 'gl-matrix';
 import { parseMDX, decodeBLP, getBLPImageData } from 'war3-model';
 import UPNG from 'upng-js';
 
 const WC3_FRAME_RATE = 1000; // MDX frames are typically in millisecs; 1000 frames = 1 sec
+
+// Warcraft 3 uses Z-up coordinate system, glTF uses Y-up
+// Transform matrix to convert Z-up to Y-up
+const Z_UP_TO_Y_UP = mat4.fromValues(
+  1, 0, 0, 0,
+  0, 0, 1, 0,
+  0, -1, 0, 0,
+  0, 0, 0, 1
+);
 
 const MODEL_DIR = path.join(process.cwd(), 'WarcraftModels');
 const OUTPUT_DIR = path.join(process.cwd(), 'models');
@@ -110,6 +119,91 @@ function formatModelName(name) {
         .trim();
 }
 
+// Convert Z-up (WC3) coordinates to Y-up (glTF)
+function convertZupToYup(v) {
+    if (!v || v.length < 3) return v;
+    return [v[0], v[2], -v[1]];
+}
+
+// Get initial geoset visibility (alpha) for a given sequence
+// Returns array of alpha values (1.0 = visible, 0.0 = hidden) per geoset
+function getGeosetVisibilityForSequence(geosetAnims, sequence, geosetCount) {
+    const alphas = new Array(geosetCount).fill(1.0);
+    if (!geosetAnims || geosetAnims.length === 0) {
+        return alphas;
+    }
+
+    const interval = sequence.Interval;
+    const startFrame = interval ? interval[0] : 0;
+    const endFrame = interval ? interval[1] : 1000;
+    const midFrame = (startFrame + endFrame) / 2;
+
+    for (const ga of geosetAnims) {
+        const geosetId = ga.GeosetId;
+        if (geosetId == null || geosetId < 0 || geosetId >= geosetCount) continue;
+
+        // Get alpha at the middle of the sequence
+        const alpha = getGeosetAlphaAtTime(ga, midFrame);
+        alphas[geosetId] = Math.max(0, Math.min(1, alpha));
+    }
+
+    return alphas;
+}
+
+// Determine if a geoset should be visible by default (for 'Stand' sequence)
+function getDefaultGeosetVisibility(model, geosetIndex) {
+    const geosetAnims = model.GeosetAnims || [];
+    const sequences = model.Sequences || [];
+
+    // Find Stand sequence
+    const standSeq = sequences.find(s => (s.Name || '').toLowerCase().includes('stand'));
+    if (!standSeq) {
+        return true; // Default to visible if no Stand sequence
+    }
+
+    const alphas = getGeosetVisibilityForSequence(geosetAnims, standSeq, model.Geosets.length);
+    return alphas[geosetIndex] > 0.5;
+}
+
+// Get alpha value for a geoset at a specific time
+// Warcraft 3 behavior: if no keys at/before the time, geoset is visible (alpha=1)
+// Keys only affect visibility at and after their frame times
+function getGeosetAlphaAtTime(geosetAnim, frame) {
+    if (!geosetAnim || !geosetAnim.Alpha || !geosetAnim.Alpha.Keys || geosetAnim.Alpha.Keys.length === 0) {
+        return 1.0; // Default to visible
+    }
+
+    const keys = geosetAnim.Alpha.Keys;
+
+    // Sort by frame
+    const sortedKeys = keys.slice().sort((a, b) => a.Frame - b.Frame);
+
+    // Before first keyframe - default to visible (1.0)
+    // The first key only takes effect AT that frame, not before
+    if (frame < sortedKeys[0].Frame) {
+        return 1.0;
+    }
+
+    // At or after first keyframe
+    // Find the key that applies at this frame
+    let currentValue = 1.0; // Default before any keys
+
+    for (let i = 0; i < sortedKeys.length; i++) {
+        const k = sortedKeys[i];
+        const v = k.Value !== undefined ? k.Value : k.Vector[0];
+
+        if (frame >= k.Frame) {
+            // This key applies
+            currentValue = v;
+        } else {
+            // We've gone past the query frame
+            break;
+        }
+    }
+
+    return currentValue;
+}
+
 function categorizeModel(filename) {
     const name = filename.toLowerCase();
     if (name.includes('portrait')) return 'Portrait';
@@ -165,6 +259,7 @@ function convertToGLB(model, modelDir) {
     const materials = model.Materials || [];
     const geosets = model.Geosets || [];
     const bones = model.Bones || [];
+    const geosetAnims = model.GeosetAnimations || [];
 
     const primitives = [];
     const accessors = [];
@@ -176,6 +271,12 @@ function convertToGLB(model, modelDir) {
 
     let bufferOffset = 0;
     const bufferChunks = [];
+
+    // Build geoset visibility lookup for default (Stand) pose
+    const geosetVisibility = [];
+    for (let i = 0; i < geosets.length; i++) {
+        geosetVisibility.push(getDefaultGeosetVisibility(model, i));
+    }
 
     const textureCache = new Map();
     function getMaterialIndex(textureImage) {
@@ -202,7 +303,9 @@ function convertToGLB(model, modelDir) {
                     baseColorTexture: { index: texIndex },
                     metallicFactor: 0,
                     roughnessFactor: 1
-                }
+                },
+                alphaMode: 'MASK',
+                alphaCutoff: 0.5
             });
         } else {
             gltfMaterials.push({
@@ -216,31 +319,90 @@ function convertToGLB(model, modelDir) {
         return matIndex;
     }
 
-    for (const geoset of geosets) {
+    // Build bone to geoset mapping for skin weights
+    // MDX uses vertex groups that map to bones, but we need to map correctly
+    const boneGeosetMap = new Map(); // boneId -> Set of geoset indices
+    const geosetBoneMap = new Map(); // geoset index -> Set of bone indices used
+
+    for (let gi = 0; gi < geosets.length; gi++) {
+        const geoset = geosets[gi];
+        if (!geoset.VertexGroup || geoset.VertexGroup.length === 0) continue;
+
+        const usedBones = new Set();
+        for (let i = 0; i < geoset.VertexGroup.length; i++) {
+            let boneIdx = geoset.VertexGroup[i];
+            if (!Number.isFinite(boneIdx)) boneIdx = 0;
+            boneIdx = Math.trunc(boneIdx);
+            if (boneIdx < 0) boneIdx = 0;
+            if (boneIdx >= bones.length) boneIdx = bones.length - 1;
+            usedBones.add(boneIdx);
+        }
+        geosetBoneMap.set(gi, usedBones);
+    }
+
+    for (let geosetIdx = 0; geosetIdx < geosets.length; geosetIdx++) {
+        const geoset = geosets[geosetIdx];
         if (!geoset.Vertices || !geoset.Faces) continue;
 
+        // Skip geosets that are invisible by default (death geosets, etc.)
+        const isVisible = geosetVisibility[geosetIdx];
+        // Still include invisible geosets but mark them - they may be animated later
+        // For now, skip them entirely to avoid visual artifacts
+        if (!isVisible) {
+            console.log(`  Skipping geoset ${geosetIdx} - hidden by default`);
+            continue;
+        }
+
         const vCount = geoset.Vertices.length / 3;
-        const positions = geoset.Vertices;
-        let normals = geoset.Normals && geoset.Normals.length >= vCount * 3
-            ? geoset.Normals
-            : null;
-        if (!normals) {
+
+        // Convert positions from Z-up to Y-up
+        const positions = new Float32Array(vCount * 3);
+        for (let i = 0; i < vCount; i++) {
+            const x = geoset.Vertices[i * 3];
+            const y = geoset.Vertices[i * 3 + 1];
+            const z = geoset.Vertices[i * 3 + 2];
+            // Z-up to Y-up: (x, y, z) -> (x, z, -y)
+            positions[i * 3] = x;
+            positions[i * 3 + 1] = z;
+            positions[i * 3 + 2] = -y;
+        }
+
+        // Convert normals from Z-up to Y-up
+        let normals;
+        if (geoset.Normals && geoset.Normals.length >= vCount * 3) {
+            normals = new Float32Array(vCount * 3);
+            for (let i = 0; i < vCount; i++) {
+                const x = geoset.Normals[i * 3];
+                const y = geoset.Normals[i * 3 + 1];
+                const z = geoset.Normals[i * 3 + 2];
+                // Z-up to Y-up for normals
+                normals[i * 3] = x;
+                normals[i * 3 + 1] = z;
+                normals[i * 3 + 2] = -y;
+            }
+        } else {
             normals = new Float32Array(vCount * 3);
             for (let i = 0; i < vCount; i++) normals[i * 3 + 1] = 1;
         }
 
-        const uvs = geoset.TVertices && geoset.TVertices[0] && geoset.TVertices[0].length >= vCount * 2
-            ? geoset.TVertices[0]
-            : null;
-        if (!uvs) {
-            const fallback = new Float32Array(vCount * 2);
+        // UVs - Warcraft 3 uses (0,0) at top-left, glTF uses (0,0) at bottom-left
+        // Need to flip V coordinate: v' = 1 - v
+        // Also clamp to [0, 1] to avoid texture wrapping issues
+        let uvs;
+        if (geoset.TVertices && geoset.TVertices[0] && geoset.TVertices[0].length >= vCount * 2) {
+            uvs = new Float32Array(vCount * 2);
             for (let i = 0; i < vCount; i++) {
-                fallback[i * 2] = 0;
-                fallback[i * 2 + 1] = 0;
+                // U stays the same, clamp to valid range
+                let u = geoset.TVertices[0][i * 2];
+                uvs[i * 2] = Math.max(0, Math.min(1, u));
+
+                // Flip V and clamp to valid range
+                let v = geoset.TVertices[0][i * 2 + 1];
+                uvs[i * 2 + 1] = Math.max(0, Math.min(1, 1.0 - v));
             }
-            // use fallback as typed array for writing
-            const uvsArr = Array.from(fallback);
-            // will write below
+        } else {
+            uvs = new Float32Array(vCount * 2);
+            uvs.fill(0);
         }
 
         const materialId = (geoset.MaterialID != null && geoset.MaterialID >= 0 && materials[geoset.MaterialID])
@@ -254,17 +416,10 @@ function convertToGLB(model, modelDir) {
         const posBuf = Buffer.alloc(positions.length * 4);
         for (let i = 0; i < positions.length; i++) posBuf.writeFloatLE(positions[i], i * 4);
         const normBuf = Buffer.alloc(normals.length * 4);
-        const normArr = normals instanceof Float32Array ? normals : new Float32Array(normals);
-        for (let i = 0; i < normArr.length; i++) normBuf.writeFloatLE(normArr[i], i * 4);
+        for (let i = 0; i < normals.length; i++) normBuf.writeFloatLE(normals[i], i * 4);
 
-        const uvSrc = uvs || (() => {
-            const a = new Float32Array(vCount * 2);
-            a.fill(0);
-            return a;
-        })();
-        const uvArr = uvSrc instanceof Float32Array ? uvSrc : new Float32Array(uvSrc);
-        const uvBuf = Buffer.alloc(uvArr.length * 4);
-        for (let i = 0; i < uvArr.length; i++) uvBuf.writeFloatLE(uvArr[i], i * 4);
+        const uvBuf = Buffer.alloc(uvs.length * 4);
+        for (let i = 0; i < uvs.length; i++) uvBuf.writeFloatLE(uvs[i], i * 4);
 
         const indices = geoset.Faces;
         const indicesBuf = Buffer.alloc(indices.length * 2);
@@ -311,9 +466,11 @@ function convertToGLB(model, modelDir) {
             { bufferView: nBV + 3, componentType: 5123, count: indices.length, type: 'SCALAR' }
         );
 
+        // Improved skin weights with validation
         if (bones.length > 0 && geoset.VertexGroup && geoset.VertexGroup.length >= vCount) {
             const jointsBuf = Buffer.alloc(vCount * 4);
             const weightsBuf = Buffer.alloc(vCount * 4 * 4);
+
             for (let i = 0; i < vCount; i++) {
                 // MDX VertexGroup can contain invalid indices (commonly -1 for "no bone").
                 // glTF/Three.js expects joint indices in [0, bones.length - 1].
@@ -322,6 +479,7 @@ function convertToGLB(model, modelDir) {
                 j = Math.trunc(j);
                 if (j < 0) j = 0;
                 j = Math.min(j, bones.length - 1);
+
                 jointsBuf.writeUInt8(j, i * 4);
                 jointsBuf.writeUInt8(0, i * 4 + 1);
                 jointsBuf.writeUInt8(0, i * 4 + 2);
@@ -382,9 +540,11 @@ function convertToGLB(model, modelDir) {
         for (let i = 0; i < bones.length; i++) {
             const b = bones[i];
             const pivot = pivotPoints[b.ObjectId] || b.PivotPoint || new Float32Array([0, 0, 0]);
+            // Convert pivot from Z-up to Y-up
+            const yUpPivot = convertZupToYup(pivot);
             const node = {
                 name: b.Name || `Bone_${i}`,
-                translation: [pivot[0], pivot[1], pivot[2]],
+                translation: [yUpPivot[0], yUpPivot[1], yUpPivot[2]],
                 rotation: [0, 0, 0, 1],
                 scale: [1, 1, 1]
             };
@@ -404,11 +564,16 @@ function convertToGLB(model, modelDir) {
             order.push(i);
         }
         for (let i = 0; i < bones.length; i++) visit(i);
+
+        // Calculate world matrices with coordinate conversion
         for (const i of order) {
             const b = bones[i];
             const pivot = pivotPoints[b.ObjectId] || b.PivotPoint || new Float32Array([0, 0, 0]);
+            const yUpPivot = convertZupToYup(pivot);
+
             mat4.identity(worldMats[i]);
-            mat4.translate(worldMats[i], worldMats[i], [pivot[0], pivot[1], pivot[2]]);
+            mat4.translate(worldMats[i], worldMats[i], [yUpPivot[0], yUpPivot[1], yUpPivot[2]]);
+
             const pIdx = b.Parent != null && b.Parent >= 0 ? objectIdToIndex.get(b.Parent) : null;
             if (pIdx != null) mat4.multiply(worldMats[i], worldMats[pIdx], worldMats[i]);
             mat4.invert(invBind[i], worldMats[i]);
@@ -499,6 +664,15 @@ function convertToGLB(model, modelDir) {
 
             transByNode.forEach((keys, nodeIndex) => {
                 keys.sort((a, b) => a.t - b.t);
+
+                // Convert translation keys from Z-up to Y-up
+                for (const key of keys) {
+                    const converted = convertZupToYup(key.v);
+                    key.v[0] = converted[0];
+                    key.v[1] = converted[1];
+                    key.v[2] = converted[2];
+                }
+
                 const vals = new Float32Array(times.length * 3);
                 for (let i = 0; i < times.length; i++) {
                     const t = times[i];
