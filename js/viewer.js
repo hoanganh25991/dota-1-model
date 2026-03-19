@@ -26,6 +26,24 @@ let applyingUrlQuery = false;
 /** MDX timelines are long in wall-clock seconds; ~25× matches typical WC3 in-engine speed at slider 1×. */
 const MDX_ANIM_BASE_SCALE = 25;
 
+/**
+ * WC3 MDX is Z-up, while glTF / Three.js is Y-up.
+ * Rotate models so "up" lines up with the browser camera intuition.
+ */
+const WC3_Z_UP_TO_Y_UP = -Math.PI / 2; // rotate around X
+
+/** Fixed yaw offset so the initial view looks at the model's "front". */
+const CAMERA_YAW_CORRECTION = -Math.PI / 2; // rotate around Y (right -> left)
+
+function rotateAroundY(x, z, yaw) {
+  const cos = Math.cos(yaw);
+  const sin = Math.sin(yaw);
+  return {
+    x: x * cos + z * sin,
+    z: -x * sin + z * cos,
+  };
+}
+
 /** Last camera distance used for Front / Side presets */
 let modelFrameDistance = 8;
 
@@ -329,6 +347,8 @@ function frameModelAndCamera(root) {
 
   // Front-quarter (Y-up): mostly +Z toward model, moderate elevation — avoids “top-down” feel.
   const dir = new THREE.Vector3(0.52, 0.42, 0.74).normalize();
+  // Align horizontal orientation with expected "front".
+  dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), CAMERA_YAW_CORRECTION);
   camera.position.copy(dir.multiplyScalar(dist));
   controls.target.set(0, 0, 0);
   camera.near = Math.max(0.01, dist * 0.002);
@@ -406,6 +426,8 @@ function loadModel(id) {
     model.path,
     (gltf) => {
       currentModel = gltf.scene;
+      // Align WC3 models' up-axis to Three.js' Y-up.
+      currentModel.rotateX(WC3_Z_UP_TO_Y_UP);
       currentModel.traverse((obj) => {
         if (obj.isMesh) {
           obj.frustumCulled = false;
@@ -426,7 +448,9 @@ function loadModel(id) {
         document.querySelector('#animation-buttons .animation-btn')?.classList.add('active');
       }
       // Geoset hide/show + bones: must run before bounding box / centering
-      mixer.update(0);
+      if (typeof mixer.setTime === 'function') mixer.setTime(0);
+      // Force the mixer to evaluate frame 0 channels (some rigs only apply on update()).
+      mixer.update(1e-4);
       currentModel.updateMatrixWorld(true);
 
       frameModelAndCamera(currentModel);
@@ -505,14 +529,20 @@ function setupUI() {
 
   document.getElementById('btn-front').addEventListener('click', () => {
     const d = modelFrameDistance || 8;
-    camera.position.set(0, d * 0.38, d * 0.92);
+    const baseX = 0;
+    const baseZ = d * 0.92;
+    const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
+    camera.position.set(r.x, d * 0.38, r.z);
     controls.target.set(0, 0, 0);
     controls.update();
   });
 
   document.getElementById('btn-side').addEventListener('click', () => {
     const d = modelFrameDistance || 8;
-    camera.position.set(d * 0.95, d * 0.35, d * 0.12);
+    const baseX = d * 0.95;
+    const baseZ = d * 0.12;
+    const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
+    camera.position.set(r.x, d * 0.35, r.z);
     controls.target.set(0, 0, 0);
     controls.update();
   });
