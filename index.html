@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Warcraft 3 Model Browser</title>
+    <link rel="stylesheet" href="styles.css">
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="loading">
+        <div class="loader"></div>
+        <p>Loading Model Browser...</p>
+    </div>
+
+    <div id="header">
+        <h1>Warcraft 3 Model Browser</h1>
+        <p id="model-count">Loading...</p>
+    </div>
+
+    <div id="sidebar">
+        <div class="search-box">
+            <input type="text" id="search-input" placeholder="Search models...">
+        </div>
+        <div id="category-filter"></div>
+        <div id="model-list"></div>
+    </div>
+
+    <div id="viewer">
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <div id="controls">
+        <div class="control-section">
+            <h3 id="current-model">Select a model</h3>
+        </div>
+
+        <div class="control-section">
+            <h3>View</h3>
+            <div class="control-row">
+                <button id="btn-reset">Reset</button>
+                <button id="btn-front">Front</button>
+                <button id="btn-side">Side</button>
+            </div>
+        </div>
+
+        <div class="control-section">
+            <h3>Animation</h3>
+            <div id="animation-buttons"></div>
+        </div>
+
+        <div class="control-section">
+            <h3>Speed</h3>
+            <div class="stat-display">
+                <span>Animation Speed:</span>
+                <span id="speed-display">1.0x</span>
+            </div>
+            <input type="range" id="speed-slider" min="0.1" max="3" step="0.05" value="1">
+        </div>
+
+        <div class="control-section">
+            <h3>Lighting</h3>
+            <div class="control-row">
+                <button id="btn-light-default" class="active">Default</button>
+                <button id="btn-light-dark">Dark</button>
+                <button id="btn-light-bright">Bright</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="info">
+        <p>Drag to rotate | Scroll to zoom | Middle-click to pan</p>
+    </div>
+
+    <script type="module" src="viewer.js"></script>
+</body>
+</html>
