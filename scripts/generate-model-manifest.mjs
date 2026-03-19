@@ -7,7 +7,6 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { mat4, quat, vec3 } from 'gl-matrix';
 import { parseMDX, decodeBLP, getBLPImageData } from 'war3-model';
 import UPNG from 'upng-js';
 import { Document, NodeIO } from '@gltf-transform/core';
@@ -18,7 +17,8 @@ const WC3_MODELS = path.join(ROOT, 'WarcraftModels');
 const MODELS_OUT = path.join(ROOT, 'models');
 
 const WC3_FPS = 30; // Warcraft 3 model animation frame rate
-const LineType = { DontInterp: 0, Linear: 1, Hermite: 2, Bezier: 3 };
+/** MDX layer shading: TwoSided */
+const LAYER_TWO_SIDED = 16;
 
 /** Infer category from filename */
 function inferCategory(basename) {
@@ -95,6 +95,51 @@ function sampleAnimVector(anim, frame, seqStart, seqEnd) {
     out[j] = k0.Vector[j] + t * (k1.Vector[j] - k0.Vector[j]);
   }
   return out;
+}
+
+/**
+ * Geoset alpha at global MDX frame (full timeline, not clipped to one sequence).
+ * Before the first key: if that key turns visibility ON (alpha>0.5), start hidden; else start visible.
+ */
+function sampleGeosetAlphaAtFrame(geosetAnim, frame) {
+  if (!geosetAnim) return 1;
+  const a = geosetAnim.Alpha;
+  if (typeof a === 'number') return a;
+  const keys = a.Keys;
+  if (!keys || keys.length === 0) return 1;
+  const sorted = [...keys].sort((x, y) => x.Frame - y.Frame);
+  if (frame < sorted[0].Frame) {
+    const v0 = sorted[0].Vector[0];
+    return v0 > 0.5 ? 0 : 1;
+  }
+  if (frame >= sorted[sorted.length - 1].Frame) {
+    return sorted[sorted.length - 1].Vector[0];
+  }
+  let i = 0;
+  while (i < sorted.length && sorted[i].Frame < frame) i++;
+  if (i === 0) return sorted[0].Vector[0];
+  const k0 = sorted[i - 1];
+  const k1 = sorted[i];
+  const t = (frame - k0.Frame) / (k1.Frame - k0.Frame);
+  return k0.Vector[0] + t * (k1.Vector[0] - k0.Vector[0]);
+}
+
+/** Map GeosetId -> GeosetAnim */
+function mapGeosetAnimsByGeosetId(model) {
+  const m = new Map();
+  for (const ga of model.GeosetAnims || []) {
+    if (ga.GeosetId != null && ga.GeosetId >= 0) m.set(ga.GeosetId, ga);
+  }
+  return m;
+}
+
+/** First non-replaceable texture path (team-color / empty Image slots fall back to this). */
+function findFallbackTextureImage(model) {
+  for (const t of model.Textures || []) {
+    const img = t.Image && String(t.Image).trim();
+    if (t.ReplaceableId === 0 && img) return t.Image;
+  }
+  return null;
 }
 
 /**
@@ -247,7 +292,11 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
   for (const mat of model.Materials || []) {
     const layer = mat.Layers?.[0];
     const texId = typeof layer?.TextureID === 'number' ? layer.TextureID : 0;
-    const texPath = model.Textures?.[texId]?.Image;
+    const texEntry = model.Textures?.[texId];
+    let texPath = texEntry?.Image && String(texEntry.Image).trim();
+    if (!texPath && texEntry?.ReplaceableId > 0) {
+      texPath = findFallbackTextureImage(model);
+    }
     let tex = null;
     if (texPath) {
       const resolved = resolveTexturePath(modelDir, texPath);
@@ -271,6 +320,7 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
     }
     const pbr = doc.createMaterial().setBaseColorFactor([1, 1, 1, 1]);
     if (tex) pbr.setBaseColorTexture(tex);
+    if (layer?.Shading & LAYER_TWO_SIDED) pbr.setDoubleSided(true);
     materials.push(pbr);
   }
 
@@ -280,11 +330,10 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
     for (const n of gltfNodes) skin.addJoint(n);
   }
 
-  let meshPrimitives = [];
-  let vertexOffset = 0;
+  const geosetAnimById = mapGeosetAnimsByGeosetId(model);
+  const geosetNodes = [];
   for (let g = 0; g < (model.Geosets || []).length; g++) {
     const geoset = model.Geosets[g];
-    const vCount = geoset.Vertices.length / 3;
     const { joints, weights } = buildSkinData(geoset, boneIndexMap);
 
     const posAcc = doc.createAccessor().setArray(new Float32Array(geoset.Vertices)).setType('VEC3').setBuffer(buffer);
@@ -308,16 +357,16 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
     const matId = Math.min(geoset.MaterialID ?? 0, materials.length - 1);
     prim.setMaterial(materials[matId >= 0 ? matId : 0]);
 
-    meshPrimitives.push(prim);
+    const mesh = doc.createMesh().addPrimitive(prim);
+    const geoNode = doc.createNode(`Geoset_${g}`);
+    geoNode.setMesh(mesh);
+    if (skin) geoNode.setSkin(skin);
+    geoNode.setTranslation([0, 0, 0]);
+    geoNode.setRotation([0, 0, 0, 1]);
+    geoNode.setScale([1, 1, 1]);
+    scene.addChild(geoNode);
+    geosetNodes.push(geoNode);
   }
-
-  const mesh = doc.createMesh();
-  for (const p of meshPrimitives) mesh.addPrimitive(p);
-
-  const meshNode = doc.createNode('Mesh');
-  meshNode.setMesh(mesh);
-  if (skin) meshNode.setSkin(skin);
-  scene.addChild(meshNode);
 
   const fps = WC3_FPS;
   for (const seq of model.Sequences || []) {
@@ -385,6 +434,34 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
       }
     }
 
+    // Geoset alpha (death/decay gibs): drive node scale 0/1 so hidden geosets don't show in Stand/Walk.
+    const VIS_ALPHA_EPS = 0.02;
+    for (let g = 0; g < geosetNodes.length; g++) {
+      const ga = geosetAnimById.get(g);
+      const geoScales = [];
+      for (const f of frames) {
+        const alpha = sampleGeosetAlphaAtFrame(ga, f);
+        const s = alpha > VIS_ALPHA_EPS ? 1 : 0;
+        geoScales.push(s, s, s);
+      }
+      let allOne = true;
+      for (let k = 0; k < geoScales.length; k++) {
+        if (geoScales[k] !== 1) {
+          allOne = false;
+          break;
+        }
+      }
+      if (allOne) continue;
+
+      const inputAcc = doc.createAccessor().setArray(new Float32Array(times)).setType('SCALAR').setBuffer(buffer);
+      const sOut = doc.createAccessor().setArray(new Float32Array(geoScales)).setType('VEC3').setBuffer(buffer);
+      const sSampler = doc.createAnimationSampler().setInput(inputAcc).setOutput(sOut);
+      const sChannel = doc.createAnimationChannel()
+        .setTargetNode(geosetNodes[g])
+        .setTargetPath('scale')
+        .setSampler(sSampler);
+      anim.addChannel(sChannel).addSampler(sSampler);
+    }
   }
 
   const io = new NodeIO();

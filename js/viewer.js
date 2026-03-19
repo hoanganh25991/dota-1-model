@@ -310,7 +310,7 @@ function setupUI() {
 
   document.getElementById('speed-slider').addEventListener('input', (e) => {
     animationSpeed = parseFloat(e.target.value);
-    document.getElementById('speed-display').textContent = `${animationSpeed.toFixed(1)}x`;
+    document.getElementById('speed-display').textContent = `${animationSpeed < 10 ? animationSpeed.toFixed(1) : animationSpeed.toFixed(0)}x`;
   });
 
   document.getElementById('btn-light-default').addEventListener('click', () => setLightPreset('default'));
