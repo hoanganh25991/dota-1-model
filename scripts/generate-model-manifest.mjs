@@ -6,6 +6,453 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { mat4, quat, vec3 } from 'gl-matrix';
 import { parseMDX, decodeBLP, getBLPImageData } from 'war3-model';
 import UPNG from 'upng-js';
+import { Document, NodeIO } from '@gltf-transform/core';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
+const WC3_MODELS = path.join(ROOT, 'WarcraftModels');
+const MODELS_OUT = path.join(ROOT, 'models');
+
+const WC3_FPS = 30; // Warcraft 3 model animation frame rate
+const LineType = { DontInterp: 0, Linear: 1, Hermite: 2, Bezier: 3 };
+
+/** Infer category from filename */
+function inferCategory(basename) {
+  const lower = basename.toLowerCase();
+  if (lower.includes('hero') || lower.includes('dreadlord') || lower.includes('archmage')) return 'Hero';
+  if (lower.includes('portrait')) return 'Portrait';
+  if (lower.includes('effect') || lower.includes('missile') || lower.includes('spell')) return 'Effect';
+  if (lower.includes('particle') || lower.includes('fire') || lower.includes('smoke')) return 'Particle';
+  if (lower.includes('blood')) return 'Blood';
+  if (lower.includes('spirit') || lower.includes('ghost')) return 'Spirit';
+  if (lower.includes('camera') || lower.includes('cinematic')) return 'Cinematic';
+  return 'Unit';
+}
+
+/** Format name for display */
+function formatName(basename) {
+  return basename
+    .replace(/_/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Resolve texture path (BLP) relative to model */
+function resolveTexturePath(modelDir, texPath) {
+  const normalized = texPath.replace(/\\/g, '/');
+  const candidates = [
+    path.join(modelDir, normalized),
+    path.join(WC3_MODELS, normalized),
+    path.join(WC3_MODELS, path.basename(normalized)),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** BLP to PNG bytes */
+function blpToPngBytes(blpPath) {
+  try {
+    const buf = fs.readFileSync(blpPath);
+    const blp = decodeBLP(buf.buffer);
+    const imgData = getBLPImageData(blp, 0);
+    const { width, height, data } = imgData;
+    const png = UPNG.encode([data.buffer], width, height, 0);
+    return Buffer.from(png);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Sample AnimVector at given frame, restricted to keys within [seqStart, seqEnd].
+ * Returns null when no keys exist in the sequence range (bone stays at bind pose).
+ */
+function sampleAnimVector(anim, frame, seqStart, seqEnd) {
+  if (!anim || !anim.Keys || anim.Keys.length === 0) return null;
+  // Only consider keyframes that belong to this sequence's range
+  const keys = anim.Keys.filter(k => k.Frame >= seqStart && k.Frame <= seqEnd);
+  if (keys.length === 0) return null;
+  if (keys.length === 1) return Array.from(keys[0].Vector);
+
+  let i = 0;
+  while (i < keys.length && keys[i].Frame < frame) i++;
+  if (i === 0) return Array.from(keys[0].Vector);
+  if (i >= keys.length) return Array.from(keys[keys.length - 1].Vector);
+
+  const k0 = keys[i - 1];
+  const k1 = keys[i];
+  const t = (frame - k0.Frame) / (k1.Frame - k0.Frame);
+  const len = k0.Vector.length;
+  const out = new Array(len);
+  for (let j = 0; j < len; j++) {
+    out[j] = k0.Vector[j] + t * (k1.Vector[j] - k0.Vector[j]);
+  }
+  return out;
+}
+
+/**
+ * Rotate vec3 v by quaternion q using Rodrigues formula.
+ * q is [x, y, z, w] (glTF / WC3 convention).
+ */
+function rotateByQuat(v, q) {
+  const vx = v[0], vy = v[1], vz = v[2];
+  const qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+  const tx = 2 * (qy * vz - qz * vy);
+  const ty = 2 * (qz * vx - qx * vz);
+  const tz = 2 * (qx * vy - qy * vx);
+  return [
+    vx + qw * tx + qy * tz - qz * ty,
+    vy + qw * ty + qz * tx - qx * tz,
+    vz + qw * tz + qx * ty - qy * tx,
+  ];
+}
+
+/**
+ * WC3 local bone matrix = T(trans) * T(pivot) * R(rot) * T(-pivot) * S(scale)
+ * Decomposed into glTF TRS:
+ *   t_gltf = trans + pivot - rotate(rot, pivot)
+ *   r_gltf = rot
+ *   s_gltf = scale
+ * In bind pose (trans=0, rot=identity, scale=1) → t_gltf = (0,0,0)  ✓
+ */
+function wc3TrsToGltf(trans, rot, scale, pivot) {
+  const t = trans || [0, 0, 0];
+  const r = rot || [0, 0, 0, 1];
+  const s = scale || [1, 1, 1];
+  const p = pivot ? [pivot[0], pivot[1], pivot[2]] : [0, 0, 0];
+  const rp = rotateByQuat(p, r);
+  return {
+    t: [t[0] + p[0] - rp[0], t[1] + p[1] - rp[1], t[2] + p[2] - rp[2]],
+    r,
+    s,
+  };
+}
+
+/** Recursively collect all nodes (Bones, Helpers) in hierarchy order */
+function collectNodes(model) {
+  const nodes = [];
+  const byId = new Map();
+  const all = [...(model.Bones || []), ...(model.Helpers || [])];
+  for (let i = 0; i < all.length; i++) {
+    const n = all[i];
+    n._index = i;
+    byId.set(n.ObjectId, n);
+  }
+  function add(node, parentIdx) {
+    const idx = nodes.length;
+    nodes.push({ node, parentIdx });
+    for (const child of all) {
+      if (child.Parent === node.ObjectId) add(child, idx);
+    }
+  }
+  for (const n of all) {
+    if (n.Parent == null || n.Parent === -1 || !byId.has(n.Parent)) add(n, -1);
+  }
+  return nodes;
+}
+
+/** Build skinning data for a geoset */
+function buildSkinData(geoset, boneIndexMap) {
+  const vCount = geoset.Vertices.length / 3;
+  const joints = new Uint16Array(vCount * 4);
+  const weights = new Float32Array(vCount * 4);
+
+  const hasSkinWeights = geoset.SkinWeights && geoset.SkinWeights.length > 0;
+  const groups = geoset.Groups || [];
+  const vertexGroup = geoset.VertexGroup || new Uint8Array(vCount);
+
+  for (let i = 0; i < vCount; i++) {
+    const groupIdx = vertexGroup[i];
+    const boneIndices = (groups[groupIdx] && groups[groupIdx].length) ? groups[groupIdx] : [0];
+
+    let w0 = 1, w1 = 0, w2 = 0, w3 = 0;
+    if (hasSkinWeights && geoset.SkinWeights.length >= (i + 1) * 8) {
+      const base = i * 8;
+      w0 = (geoset.SkinWeights[base] ?? 255) / 255;
+      w1 = (geoset.SkinWeights[base + 2] ?? 0) / 255;
+      w2 = (geoset.SkinWeights[base + 4] ?? 0) / 255;
+      w3 = (geoset.SkinWeights[base + 6] ?? 0) / 255;
+      const sum = w0 + w1 + w2 + w3;
+      if (sum > 0) { w0 /= sum; w1 /= sum; w2 /= sum; w3 /= sum; }
+    }
+
+    const j0 = boneIndexMap.get(boneIndices[0]) ?? 0;
+    const j1 = boneIndices[1] != null ? (boneIndexMap.get(boneIndices[1]) ?? 0) : 0;
+    const j2 = boneIndices[2] != null ? (boneIndexMap.get(boneIndices[2]) ?? 0) : 0;
+    const j3 = boneIndices[3] != null ? (boneIndexMap.get(boneIndices[3]) ?? 0) : 0;
+
+    joints[i * 4] = j0;
+    joints[i * 4 + 1] = j1;
+    joints[i * 4 + 2] = j2;
+    joints[i * 4 + 3] = j3;
+    weights[i * 4] = w0;
+    weights[i * 4 + 1] = w1;
+    weights[i * 4 + 2] = w2;
+    weights[i * 4 + 3] = w3;
+  }
+  return { joints, weights };
+}
+
+/** Convert MDX to GLB with animations */
+async function convertMdxToGlb(mdxPath, outPath, modelDir) {
+  const buf = fs.readFileSync(mdxPath);
+  let model;
+  try {
+    model = parseMDX(buf.buffer);
+  } catch (e) {
+    throw new Error(e.message || 'Not a mdx model');
+  }
+  const doc = new Document();
+
+  const root = doc.getRoot();
+  const buffer = doc.createBuffer();
+
+  const boneIndexMap = new Map();
+  const collected = collectNodes(model);
+  for (let i = 0; i < collected.length; i++) {
+    boneIndexMap.set(collected[i].node.ObjectId, i);
+  }
+
+  const gltfNodes = [];
+  for (let i = 0; i < collected.length; i++) {
+    const { node, parentIdx } = collected[i];
+    const gltfNode = doc.createNode(node.Name || `Node_${i}`);
+
+    // Bind pose: all bones at identity (trans=0, rot=identity, scale=1).
+    // inverseBindMatrices default to identity, which is correct when bind pose = identity.
+    gltfNode.setTranslation([0, 0, 0]);
+    gltfNode.setRotation([0, 0, 0, 1]);
+    gltfNode.setScale([1, 1, 1]);
+
+    if (parentIdx >= 0) {
+      gltfNodes[parentIdx].addChild(gltfNode);
+    }
+    gltfNodes.push(gltfNode);
+  }
+
+  const scene = doc.createScene('Scene');
+  for (let i = 0; i < collected.length; i++) {
+    if (collected[i].parentIdx === -1) scene.addChild(gltfNodes[i]);
+  }
+
+  const textureCache = new Map();
+  const materials = [];
+  for (const mat of model.Materials || []) {
+    const layer = mat.Layers?.[0];
+    const texId = typeof layer?.TextureID === 'number' ? layer.TextureID : 0;
+    const texPath = model.Textures?.[texId]?.Image;
+    let tex = null;
+    if (texPath) {
+      const resolved = resolveTexturePath(modelDir, texPath);
+      if (resolved) {
+        const ext = path.extname(resolved).toLowerCase();
+        let imgBytes = null;
+        if (ext === '.blp') {
+          imgBytes = blpToPngBytes(resolved);
+        } else if (['.png', '.jpg', '.jpeg'].includes(ext)) {
+          imgBytes = fs.readFileSync(resolved);
+        }
+        if (imgBytes) {
+          const cacheKey = resolved;
+          if (!textureCache.has(cacheKey)) {
+            const texture = doc.createTexture().setImage(imgBytes).setMimeType('image/png');
+            textureCache.set(cacheKey, texture);
+          }
+          tex = textureCache.get(cacheKey);
+        }
+      }
+    }
+    const pbr = doc.createMaterial().setBaseColorFactor([1, 1, 1, 1]);
+    if (tex) pbr.setBaseColorTexture(tex);
+    materials.push(pbr);
+  }
+
+  let skin = null;
+  if (collected.length > 0) {
+    skin = doc.createSkin();
+    for (const n of gltfNodes) skin.addJoint(n);
+  }
+
+  let meshPrimitives = [];
+  let vertexOffset = 0;
+  for (let g = 0; g < (model.Geosets || []).length; g++) {
+    const geoset = model.Geosets[g];
+    const vCount = geoset.Vertices.length / 3;
+    const { joints, weights } = buildSkinData(geoset, boneIndexMap);
+
+    const posAcc = doc.createAccessor().setArray(new Float32Array(geoset.Vertices)).setType('VEC3').setBuffer(buffer);
+    const normAcc = doc.createAccessor().setArray(new Float32Array(geoset.Normals)).setType('VEC3').setBuffer(buffer);
+    const uvAcc = doc.createAccessor()
+      .setArray(new Float32Array(geoset.TVertices[0] || []))
+      .setType('VEC2')
+      .setBuffer(buffer);
+    const jointsAcc = doc.createAccessor().setArray(joints).setType('VEC4').setBuffer(buffer);
+    const weightsAcc = doc.createAccessor().setArray(weights).setType('VEC4').setBuffer(buffer);
+
+    const prim = doc.createPrimitive()
+      .setAttribute('POSITION', posAcc)
+      .setAttribute('NORMAL', normAcc)
+      .setAttribute('TEXCOORD_0', uvAcc)
+      .setAttribute('JOINTS_0', jointsAcc)
+      .setAttribute('WEIGHTS_0', weightsAcc)
+      .setMode(4)
+      .setIndices(doc.createAccessor().setArray(geoset.Faces).setBuffer(buffer));
+
+    const matId = Math.min(geoset.MaterialID ?? 0, materials.length - 1);
+    prim.setMaterial(materials[matId >= 0 ? matId : 0]);
+
+    meshPrimitives.push(prim);
+  }
+
+  const mesh = doc.createMesh();
+  for (const p of meshPrimitives) mesh.addPrimitive(p);
+
+  const meshNode = doc.createNode('Mesh');
+  meshNode.setMesh(mesh);
+  if (skin) meshNode.setSkin(skin);
+  scene.addChild(meshNode);
+
+  const fps = WC3_FPS;
+  for (const seq of model.Sequences || []) {
+    const interval = seq.Interval || new Uint32Array([0, 0]);
+    const startFrame = interval[0];
+    const endFrame = interval[1];
+    if (endFrame <= startFrame) continue;
+
+    const anim = doc.createAnimation(seq.Name || `Anim_${seq.Interval[0]}`);
+
+    // glTF / Three.js expect keyframe times relative to clip start (0 … duration).
+    // MDX uses a global frame timeline (e.g. Walk at 3333–4333); using f/fps would put
+    // the first key at ~111s so AnimationMixer at t=0 clamps to frame 0 pose → "no walk".
+    const times = [];
+    const frames = [];
+    for (let f = startFrame; f <= endFrame; f++) {
+      times.push((f - startFrame) / fps);
+      frames.push(f);
+    }
+
+    for (let i = 0; i < collected.length; i++) {
+      const { node } = collected[i];
+      const gltfNode = gltfNodes[i];
+
+      const translations = [];
+      const rotations = [];
+      const scales = [];
+
+      const pivot = node.PivotPoint ? Array.from(node.PivotPoint) : [0, 0, 0];
+      for (const f of frames) {
+        // Only sample keyframes within this sequence's range to prevent bleed-over
+        const t = sampleAnimVector(node.Translation, f, startFrame, endFrame) ?? [0, 0, 0];
+        const r = sampleAnimVector(node.Rotation, f, startFrame, endFrame) ?? [0, 0, 0, 1];
+        const s = sampleAnimVector(node.Scaling, f, startFrame, endFrame) ?? [1, 1, 1];
+        const gltf = wc3TrsToGltf(t, r, s, pivot);
+        translations.push(...gltf.t);
+        rotations.push(...gltf.r);
+        scales.push(...gltf.s);
+      }
+
+      // Only create channels for nodes that actually animate in this sequence
+      const hasTransInSeq = (node.Translation?.Keys || []).some(k => k.Frame >= startFrame && k.Frame <= endFrame);
+      const hasRotInSeq = (node.Rotation?.Keys || []).some(k => k.Frame >= startFrame && k.Frame <= endFrame);
+      const hasScaleInSeq = (node.Scaling?.Keys || []).some(k => k.Frame >= startFrame && k.Frame <= endFrame);
+
+      if (hasTransInSeq || hasRotInSeq) {
+        const inputAcc = doc.createAccessor().setArray(new Float32Array(times)).setType('SCALAR').setBuffer(buffer);
+
+        const tOut = doc.createAccessor().setArray(new Float32Array(translations)).setType('VEC3').setBuffer(buffer);
+        const tSampler = doc.createAnimationSampler().setInput(inputAcc).setOutput(tOut);
+        const tChannel = doc.createAnimationChannel().setTargetNode(gltfNode).setTargetPath('translation').setSampler(tSampler);
+        anim.addChannel(tChannel).addSampler(tSampler);
+
+        const rOut = doc.createAccessor().setArray(new Float32Array(rotations)).setType('VEC4').setBuffer(buffer);
+        const rSampler = doc.createAnimationSampler().setInput(inputAcc).setOutput(rOut);
+        const rChannel = doc.createAnimationChannel().setTargetNode(gltfNode).setTargetPath('rotation').setSampler(rSampler);
+        anim.addChannel(rChannel).addSampler(rSampler);
+      }
+      if (hasScaleInSeq) {
+        const inputAcc = doc.createAccessor().setArray(new Float32Array(times)).setType('SCALAR').setBuffer(buffer);
+        const sOut = doc.createAccessor().setArray(new Float32Array(scales)).setType('VEC3').setBuffer(buffer);
+        const sSampler = doc.createAnimationSampler().setInput(inputAcc).setOutput(sOut);
+        const sChannel = doc.createAnimationChannel().setTargetNode(gltfNode).setTargetPath('scale').setSampler(sSampler);
+        anim.addChannel(sChannel).addSampler(sSampler);
+      }
+    }
+
+  }
+
+  const io = new NodeIO();
+  await io.write(outPath, doc);
+}
+
+/** Main */
+async function main() {
+  if (!fs.existsSync(WC3_MODELS)) {
+    fs.mkdirSync(WC3_MODELS, { recursive: true });
+    console.log('Created WarcraftModels/ (empty). Add MDX files and run again.');
+    writeManifest([]);
+    return;
+  }
+
+  if (!fs.existsSync(MODELS_OUT)) fs.mkdirSync(MODELS_OUT, { recursive: true });
+
+  const mdxFiles = [];
+  function scan(dir) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) scan(full);
+      else if (e.name.toLowerCase().endsWith('.mdx')) mdxFiles.push(full);
+    }
+  }
+  scan(WC3_MODELS);
+
+  const manifest = [];
+  for (let i = 0; i < mdxFiles.length; i++) {
+    const mdxPath = mdxFiles[i];
+    const rel = path.relative(WC3_MODELS, mdxPath);
+    const basename = path.basename(mdxPath, '.mdx');
+    const modelDir = path.dirname(mdxPath);
+    const glbName = basename + '.glb';
+    const outPath = path.join(MODELS_OUT, glbName);
+
+    const entry = {
+      id: basename,
+      name: formatName(basename),
+      category: inferCategory(basename),
+      path: `models/${glbName}`,
+    };
+
+    try {
+      if (fs.existsSync(outPath)) {
+        manifest.push(entry);
+        console.log(`[${i + 1}/${mdxFiles.length}] ${basename} (skip, glb exists)`);
+        continue;
+      }
+      await convertMdxToGlb(mdxPath, outPath, modelDir);
+      manifest.push(entry);
+      console.log(`[${i + 1}/${mdxFiles.length}] ${basename}`);
+    } catch (err) {
+      console.error(`Failed ${basename}:`, err.message);
+    }
+  }
+
+  writeManifest(manifest);
+  console.log(`Done. ${manifest.length} models, manifest written.`);
+}
+
+function writeManifest(manifest) {
+  const outPath = path.join(WC3_MODELS, 'manifest.json');
+  fs.writeFileSync(outPath, JSON.stringify({ models: manifest }, null, 2));
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

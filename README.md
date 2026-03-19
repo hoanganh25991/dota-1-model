@@ -54,7 +54,7 @@ node scripts/generate-model-manifest.mjs
 
 This will:
 1. Scan for new MDX files
-2. Convert them to GLB in `models/`
+2. Convert them to GLB in `models/` (skips MDX when `models/<name>.glb` already exists — delete a GLB to force reconvert). **Reconvert** after pipeline fixes (e.g. animation timing): animations use clip-relative times so Walk / Stand play correctly in Three.js.
 3. Update `manifest.json`
 
 ## Model Names
