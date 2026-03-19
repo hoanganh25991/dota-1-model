@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
  * Scan WarcraftModels/ for *.mdx files
- * Convert each MDX to GLB for browser viewing
+ * Convert each MDX to GLB for browser viewing (with BLP textures and UVs)
  * Write manifest.json with model list
  */
 import fs from 'fs';
 import path from 'path';
-import { parseMDX } from 'war3-model';
+import { parseMDX, decodeBLP, getBLPImageData } from 'war3-model';
+import UPNG from 'upng-js';
 
 const MODEL_DIR = path.join(process.cwd(), 'WarcraftModels');
 const OUTPUT_DIR = path.join(process.cwd(), 'models');
@@ -54,7 +55,7 @@ for (const file of files) {
         const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
         const model = parseMDX(arrayBuffer);
 
-        const result = convertToGLB(model);
+        const result = convertToGLB(model, MODEL_DIR);
         fs.writeFileSync(glbPath, result);
         converted++;
 
@@ -69,6 +70,10 @@ for (const file of files) {
             console.log(`Converted ${converted}/${files.length}...`);
         }
     } catch (err) {
+        if (err.message === 'No geometry') {
+            // Skip cameras, effects, etc. without counting as error
+            continue;
+        }
         errors++;
         console.error(`Error converting ${file}: ${err.message}`);
     }
@@ -114,86 +119,222 @@ function categorizeModel(filename) {
     return 'Unit';
 }
 
-function convertToGLB(model) {
-    const allPositions = [];
-    const allNormals = [];
-    const allIndices = [];
-    let vertexOffset = 0;
+function resolveTexturePath(modelDir, textureImage) {
+    if (!textureImage || typeof textureImage !== 'string') return null;
+    const normalized = textureImage.replace(/\\/g, path.sep).trim();
+    if (!normalized.toLowerCase().endsWith('.blp')) return null;
+    const candidates = [
+        path.join(modelDir, normalized),
+        path.join(modelDir, path.basename(normalized)),
+        path.join(modelDir, path.basename(normalized.toLowerCase())),
+    ];
+    for (const p of candidates) {
+        if (fs.existsSync(p)) return p;
+    }
+    return null;
+}
 
-    for (const geoset of model.Geosets) {
-        if (!geoset.Vertices || !geoset.Faces) continue;
+function loadTextureAsPngBuffer(modelDir, textureImage) {
+    const resolved = resolveTexturePath(modelDir, textureImage);
+    if (!resolved) return null;
+    try {
+        const buf = fs.readFileSync(resolved);
+        const arrayBuffer = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        const blp = decodeBLP(arrayBuffer);
+        if (!blp.mipmaps || blp.mipmaps.length === 0) return null;
+        const imageData = getBLPImageData(blp, 0);
+        if (!imageData || !imageData.data || !imageData.width || !imageData.height) return null;
+        const w = imageData.width;
+        const h = imageData.height;
+        const data = imageData.data;
+        const rgba = data.byteOffset === 0 && data.byteLength === w * h * 4
+            ? data.buffer
+            : new Uint8Array(data).buffer;
+        const pngAb = UPNG.encode([rgba], w, h, 0);
+        return Buffer.from(pngAb);
+    } catch (e) {
+        return null;
+    }
+}
 
-        for (let i = 0; i < geoset.Vertices.length; i += 3) {
-            allPositions.push(geoset.Vertices[i], geoset.Vertices[i + 1], geoset.Vertices[i + 2]);
-        }
+function convertToGLB(model, modelDir) {
+    const textures = model.Textures || [];
+    const materials = model.Materials || [];
+    const geosets = model.Geosets || [];
 
-        if (geoset.Normals && geoset.Normals.length > 0) {
-            for (let i = 0; i < geoset.Normals.length; i += 3) {
-                allNormals.push(geoset.Normals[i], geoset.Normals[i + 1], geoset.Normals[i + 2]);
-            }
+    const primitives = [];
+    const accessors = [];
+    const bufferViews = [];
+    const images = [];
+    const samplers = [{ wrapS: 10497, wrapT: 10497 }];
+    const gltfTextures = [];
+    const gltfMaterials = [];
+
+    let bufferOffset = 0;
+    const bufferChunks = [];
+
+    const textureCache = new Map();
+    function getMaterialIndex(textureImage) {
+        const key = (textureImage || '').trim();
+        if (textureCache.has(key)) return textureCache.get(key);
+        const pngBuf = loadTextureAsPngBuffer(modelDir, key);
+        const matIndex = gltfMaterials.length;
+        textureCache.set(key, matIndex);
+        if (pngBuf && pngBuf.length > 0) {
+            const viewIndex = bufferViews.length;
+            bufferViews.push({
+                buffer: 0,
+                byteOffset: bufferOffset,
+                byteLength: pngBuf.length
+            });
+            bufferChunks.push(pngBuf);
+            bufferOffset += pngBuf.length;
+            const imageIndex = images.length;
+            images.push({ bufferView: viewIndex, mimeType: 'image/png' });
+            const texIndex = gltfTextures.length;
+            gltfTextures.push({ sampler: 0, source: imageIndex });
+            gltfMaterials.push({
+                pbrMetallicRoughness: {
+                    baseColorTexture: { index: texIndex },
+                    metallicFactor: 0,
+                    roughnessFactor: 1
+                }
+            });
         } else {
-            for (let i = 0; i < geoset.Vertices.length / 3; i++) {
-                allNormals.push(0, 1, 0);
-            }
+            gltfMaterials.push({
+                pbrMetallicRoughness: {
+                    baseColorFactor: [0.5, 0.5, 0.5, 1],
+                    metallicFactor: 0,
+                    roughnessFactor: 1
+                }
+            });
         }
-
-        for (let i = 0; i < geoset.Faces.length; i += 3) {
-            allIndices.push(
-                geoset.Faces[i] + vertexOffset,
-                geoset.Faces[i + 1] + vertexOffset,
-                geoset.Faces[i + 2] + vertexOffset
-            );
-        }
-
-        vertexOffset += geoset.Vertices.length / 3;
+        return matIndex;
     }
 
-    if (allPositions.length === 0) {
+    for (const geoset of geosets) {
+        if (!geoset.Vertices || !geoset.Faces) continue;
+
+        const vCount = geoset.Vertices.length / 3;
+        const positions = geoset.Vertices;
+        let normals = geoset.Normals && geoset.Normals.length >= vCount * 3
+            ? geoset.Normals
+            : null;
+        if (!normals) {
+            normals = new Float32Array(vCount * 3);
+            for (let i = 0; i < vCount; i++) normals[i * 3 + 1] = 1;
+        }
+
+        const uvs = geoset.TVertices && geoset.TVertices[0] && geoset.TVertices[0].length >= vCount * 2
+            ? geoset.TVertices[0]
+            : null;
+        if (!uvs) {
+            const fallback = new Float32Array(vCount * 2);
+            for (let i = 0; i < vCount; i++) {
+                fallback[i * 2] = 0;
+                fallback[i * 2 + 1] = 0;
+            }
+            // use fallback as typed array for writing
+            const uvsArr = Array.from(fallback);
+            // will write below
+        }
+
+        const materialId = (geoset.MaterialID != null && geoset.MaterialID >= 0 && materials[geoset.MaterialID])
+            ? geoset.MaterialID
+            : 0;
+        const layer = materials[materialId]?.Layers?.[0];
+        const textureId = (layer && layer.TextureID != null && layer.TextureID >= 0) ? layer.TextureID : 0;
+        const textureImage = textures[textureId]?.Image;
+        const matIndex = getMaterialIndex(textureImage);
+
+        const posBuf = Buffer.alloc(positions.length * 4);
+        for (let i = 0; i < positions.length; i++) posBuf.writeFloatLE(positions[i], i * 4);
+        const normBuf = Buffer.alloc(normals.length * 4);
+        const normArr = normals instanceof Float32Array ? normals : new Float32Array(normals);
+        for (let i = 0; i < normArr.length; i++) normBuf.writeFloatLE(normArr[i], i * 4);
+
+        const uvSrc = uvs || (() => {
+            const a = new Float32Array(vCount * 2);
+            a.fill(0);
+            return a;
+        })();
+        const uvArr = uvSrc instanceof Float32Array ? uvSrc : new Float32Array(uvSrc);
+        const uvBuf = Buffer.alloc(uvArr.length * 4);
+        for (let i = 0; i < uvArr.length; i++) uvBuf.writeFloatLE(uvArr[i], i * 4);
+
+        const indices = geoset.Faces;
+        const indicesBuf = Buffer.alloc(indices.length * 2);
+        for (let i = 0; i < indices.length; i++) indicesBuf.writeUInt16LE(indices[i], i * 2);
+
+        const posOffset = bufferOffset;
+        bufferChunks.push(posBuf);
+        bufferOffset += posBuf.length;
+        const normOffset = bufferOffset;
+        bufferChunks.push(normBuf);
+        bufferOffset += normBuf.length;
+        const uvOffset = bufferOffset;
+        bufferChunks.push(uvBuf);
+        bufferOffset += uvBuf.length;
+        const indOffset = bufferOffset;
+        bufferChunks.push(indicesBuf);
+        bufferOffset += indicesBuf.length;
+
+        const posMin = [
+            Math.min(...Array.from(positions).filter((_, i) => i % 3 === 0)),
+            Math.min(...Array.from(positions).filter((_, i) => i % 3 === 1)),
+            Math.min(...Array.from(positions).filter((_, i) => i % 3 === 2))
+        ];
+        const posMax = [
+            Math.max(...Array.from(positions).filter((_, i) => i % 3 === 0)),
+            Math.max(...Array.from(positions).filter((_, i) => i % 3 === 1)),
+            Math.max(...Array.from(positions).filter((_, i) => i % 3 === 2))
+        ];
+
+        const nBV = bufferViews.length;
+        bufferViews.push(
+            { buffer: 0, byteOffset: posOffset, byteLength: posBuf.length, target: 34962 },
+            { buffer: 0, byteOffset: normOffset, byteLength: normBuf.length, target: 34962 },
+            { buffer: 0, byteOffset: uvOffset, byteLength: uvBuf.length, target: 34962 },
+            { buffer: 0, byteOffset: indOffset, byteLength: indicesBuf.length, target: 34963 }
+        );
+
+        const nAcc = accessors.length;
+        accessors.push(
+            { bufferView: nBV, componentType: 5126, count: vCount, type: 'VEC3', min: posMin, max: posMax },
+            { bufferView: nBV + 1, componentType: 5126, count: vCount, type: 'VEC3' },
+            { bufferView: nBV + 2, componentType: 5126, count: vCount, type: 'VEC2' },
+            { bufferView: nBV + 3, componentType: 5123, count: indices.length, type: 'SCALAR' }
+        );
+
+        primitives.push({
+            attributes: { POSITION: nAcc, NORMAL: nAcc + 1, TEXCOORD_0: nAcc + 2 },
+            indices: nAcc + 3,
+            material: matIndex
+        });
+    }
+
+    if (primitives.length === 0) {
         throw new Error('No geometry');
     }
 
-    const positionsBuf = Buffer.alloc(allPositions.length * 4);
-    for (let i = 0; i < allPositions.length; i++) {
-        positionsBuf.writeFloatLE(allPositions[i], i * 4);
-    }
-
-    const normalsBuf = Buffer.alloc(allNormals.length * 4);
-    for (let i = 0; i < allNormals.length; i++) {
-        normalsBuf.writeFloatLE(allNormals[i], i * 4);
-    }
-
-    const indicesBuf = Buffer.alloc(allIndices.length * 2);
-    for (let i = 0; i < allIndices.length; i++) {
-        indicesBuf.writeUInt16LE(allIndices[i], i * 2);
-    }
-
-    const totalBuffer = Buffer.concat([positionsBuf, normalsBuf, indicesBuf]);
+    const totalBuffer = Buffer.concat(bufferChunks);
 
     const gltf = {
-        asset: { version: "2.0", generator: "MDXtoGLTF" },
+        asset: { version: '2.0', generator: 'MDXtoGLTF+BLP' },
         scene: 0,
         scenes: [{ nodes: [0] }],
-        nodes: [{ name: model.Info.Name || 'Model', mesh: 0 }],
-        meshes: [{
-            name: model.Info.Name || 'Model',
-            primitives: [{ mode: 4, attributes: { POSITION: 0, NORMAL: 1 }, indices: 2 }]
-        }],
-        accessors: [
-            {
-                bufferView: 0, componentType: 5126, count: allPositions.length / 3, type: "VEC3",
-                min: [Math.min(...allPositions.filter((_, i) => i % 3 === 0)), Math.min(...allPositions.filter((_, i) => i % 3 === 1)), Math.min(...allPositions.filter((_, i) => i % 3 === 2))],
-                max: [Math.max(...allPositions.filter((_, i) => i % 3 === 0)), Math.max(...allPositions.filter((_, i) => i % 3 === 1)), Math.max(...allPositions.filter((_, i) => i % 3 === 2))]
-            },
-            { bufferView: 1, componentType: 5126, count: allNormals.length / 3, type: "VEC3" },
-            { bufferView: 2, componentType: 5123, count: allIndices.length, type: "SCALAR" }
-        ],
-        bufferViews: [
-            { buffer: 0, byteOffset: 0, byteLength: positionsBuf.length, target: 34962 },
-            { buffer: 0, byteOffset: positionsBuf.length, byteLength: normalsBuf.length, target: 34962 },
-            { buffer: 0, byteOffset: positionsBuf.length + normalsBuf.length, byteLength: indicesBuf.length, target: 34963 }
-        ],
-        buffers: [{ byteLength: totalBuffer.length }]
+        nodes: [{ name: model.Info?.Name || 'Model', mesh: 0 }],
+        meshes: [{ name: model.Info?.Name || 'Model', primitives }],
+        accessors,
+        bufferViews,
+        buffers: [{ byteLength: totalBuffer.length }],
+        materials: gltfMaterials,
+        textures: gltfTextures,
+        images: images,
+        samplers: images.length ? samplers : undefined
     };
+    if (!gltf.images.length) delete gltf.images;
+    if (!gltf.samplers) delete gltf.samplers;
 
     const gltfJson = JSON.stringify(gltf);
 

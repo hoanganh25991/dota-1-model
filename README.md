@@ -16,9 +16,11 @@ Open `http://localhost:8000`
 ```
 dota-1-model/
 ├── index.html              # Main viewer
-├── viewer.js              # Three.js application
-├── styles.css             # Styling
-├── models/                # Converted GLB files (3055 models)
+├── css/styles.css          # Styling
+├── js/viewer.js            # Three.js application
+├── models/                 # Converted GLB files
+├── docs/
+│   └── ANIMATIONS.md       # How WC3 animations work and how to add them
 ├── scripts/
 │   └── generate-model-manifest.mjs  # MDX to GLB converter
 ├── WarcraftModels/        # Source MDX files (3244 files)
@@ -38,7 +40,7 @@ dota-1-model/
 - **Category filter**: Unit, Hero, Portrait, Effect, Particle, Blood, Spirit, Cinematic
 - **Search**: Filter by name across all models
 - **3D viewer** with orbit controls (drag/zoom/pan)
-- **Animations**: Stand, Walk, Attack, Death, Spell
+- **Animation buttons**: Stand, Walk, Attack, Death, Spell (currently procedural; see [docs/ANIMATIONS.md](docs/ANIMATIONS.md) for real WC3 animation support)
 - **Speed slider**: Adjust animation speed
 - **Lighting presets**: Default, Dark, Bright
 
