@@ -47,11 +47,12 @@ body {
     color: #666;
 }
 
+/* Same horizontal band as #viewer so title/gradient never sit under the sidebar (sidebar is slightly transparent). */
 #header {
     position: fixed;
     top: 0;
-    left: 0;
-    right: 300px;
+    left: 300px;
+    right: 280px;
     padding: 20px 30px;
     background: linear-gradient(180deg, rgba(10,10,15,0.95) 0%, rgba(10,10,15,0) 100%);
     z-index: 100;
@@ -80,7 +81,7 @@ body {
     left: 0;
     width: 300px;
     height: 100vh;
-    background: rgba(10, 10, 15, 0.95);
+    background: #0a0a0f;
     border-right: 1px solid rgba(0, 255, 136, 0.2);
     z-index: 200;
     display: flex;
@@ -366,6 +367,10 @@ input[type="range"] {
     }
     #viewer {
         left: 250px;
+    }
+    #header {
+        left: 250px;
+        right: 250px;
     }
     #controls {
         width: 250px;
