@@ -113,11 +113,12 @@ Creates:
 
 Lighting and environment:
 - `AmbientLight(0xffffff, LIGHT_PRESETS.default.ambient)` — default ambient **0.4**
-- `DirectionalLight(0xffffff, LIGHT_PRESETS.default.directional)` — default **0.8**, `position.set(5, 10, 7)`, `castShadow = true`, shadow map **2048×2048**
+- `DirectionalLight(0xffffff, LIGHT_PRESETS.default.directional)` — default **0.8**, `position.set(5, 10, 7)`, `castShadow = true`, shadow map **2048×2048**, orthographic shadow frustum **±120** (covers the floor)
 - `RoomEnvironment` → `PMREMGenerator(renderer).fromScene(env).texture` → `scene.environment`
 
 Scene graph:
 - `modelGroup = new THREE.Group()`, `scene.add(modelGroup)` — loaded GLB roots are parented here.
+- Checkerboard **ground plane** (`createCheckerGround()`): **500×500** `PlaneGeometry`, `MeshStandardMaterial` with a canvas **checker** texture (`RepeatWrapping` ×48), rotated **−90°** around X (lies in **XZ**), `position.y = GROUND_Y` (**−0.02**), `receiveShadow = true`. Not parented under `modelGroup` so it persists across model changes.
 
 `clock = new THREE.Clock()`.
 
@@ -151,6 +152,7 @@ On load:
 3. Traverse and material adjustments:
    - for each `obj.isMesh`:
      - `obj.frustumCulled = false`
+     - `obj.castShadow = true`, `obj.receiveShadow = true` (contact shadows on the checker floor)
      - normalize `obj.material` to an array and iterate **every** slot
      - for each material `m`:
        - if `m.map` exists and `m.opacity <= 1e-5`: set `m.opacity = 1` (fixes glTF exports where

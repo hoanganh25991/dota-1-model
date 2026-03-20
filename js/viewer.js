@@ -11,7 +11,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 const MANIFEST_URL = 'WarcraftModels/manifest.json';
 
 let scene, camera, renderer, controls;
-let modelGroup, currentModel, mixer, clock;
+let modelGroup, groundPlane, currentModel, mixer, clock;
 /** @type {THREE.AnimationClip[]} Clips from the last loaded GLB (for button handlers) */
 let currentClips = [];
 let ambientLight, directionalLight;
@@ -32,6 +32,53 @@ const MDX_ANIM_BASE_SCALE = 25;
  */
 /** Neutral grey backdrop so heroes read clearly vs pure black. */
 const VIEWER_BACKGROUND = 0xa8a8b0;
+
+/** Horizontal checkerboard floor (world Y); slightly below origin to limit z-fighting with feet. */
+const GROUND_Y = -0.02;
+
+/**
+ * Infinite-feel floor: repeating checker texture on a large plane (XZ, Y-up).
+ */
+function createCheckerGround() {
+  const size = 128;
+  const cells = 8;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const cell = size / cells;
+  const light = '#94949e';
+  const dark = '#6e6e7a';
+  for (let y = 0; y < cells; y++) {
+    for (let x = 0; x < cells; x++) {
+      ctx.fillStyle = (x + y) % 2 === 0 ? light : dark;
+      ctx.fillRect(x * cell, y * cell, cell + 0.5, cell + 0.5);
+    }
+  }
+  const map = new THREE.CanvasTexture(canvas);
+  map.wrapS = map.wrapT = THREE.RepeatWrapping;
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.repeat.set(48, 48);
+  map.anisotropy = 8;
+
+  const geo = new THREE.PlaneGeometry(500, 500);
+  const mat = new THREE.MeshStandardMaterial({
+    map,
+    roughness: 0.92,
+    metalness: 0.05,
+    envMapIntensity: 0.35,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = GROUND_Y;
+  mesh.receiveShadow = true;
+  mesh.name = 'CheckerGround';
+  mesh.frustumCulled = false;
+  return mesh;
+}
 
 const WC3_Z_UP_TO_Y_UP = -Math.PI / 2; // rotate around X
 
@@ -100,7 +147,19 @@ function init() {
   directionalLight.castShadow = true;
   directionalLight.shadow.mapSize.width = 2048;
   directionalLight.shadow.mapSize.height = 2048;
+  directionalLight.shadow.bias = -0.0002;
+  directionalLight.shadow.normalBias = 0.02;
+  const sh = 120;
+  directionalLight.shadow.camera.left = -sh;
+  directionalLight.shadow.camera.right = sh;
+  directionalLight.shadow.camera.top = sh;
+  directionalLight.shadow.camera.bottom = -sh;
+  directionalLight.shadow.camera.near = 1;
+  directionalLight.shadow.camera.far = 400;
   scene.add(directionalLight);
+
+  groundPlane = createCheckerGround();
+  scene.add(groundPlane);
 
   const env = new RoomEnvironment();
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -485,6 +544,8 @@ function loadModel(id) {
       currentModel.traverse((obj) => {
         if (!obj.isMesh) return;
         obj.frustumCulled = false;
+        obj.castShadow = true;
+        obj.receiveShadow = true;
         const mats = obj.material ? (Array.isArray(obj.material) ? obj.material : [obj.material]) : [];
         for (const m of mats) {
           if (!m) continue;
