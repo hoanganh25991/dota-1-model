@@ -10,7 +10,7 @@ Correctness must match the existing spec contract:
 - `docs/VIEWER_RUNTIME_SPEC.md` (behavioral expectations for animation + framing)
 
 ## Constraints / Assumptions
-1. The browser viewer currently loads `WarcraftModels/manifest.json` and fetches `models/<id>.glb` via `GLTFLoader`.
+1. The browser viewer currently loads `models/manifest.json` and fetches `models/<id>.glb` via `GLTFLoader`.
 2. Three.js does not natively load `.mdx` or `.blp`; therefore a custom runtime loader is required.
 3. Runtime mode must still support the same animation playback UX (clip selection + looping) and the same WC3-like timing assumptions used in the exporter.
 
@@ -21,14 +21,14 @@ Correctness must match the existing spec contract:
    - `pkg/war3_codec/` (or similar wasm-pack output folder)
    - includes `pkg/..._bg.wasm` and the wasm-bindgen JS glue
 3. Runtime-compatible manifest fields:
-   - update `WarcraftModels/manifest.json` generation so each model row includes enough information to fetch the source `.mdx` and resolve texture paths.
+   - update `models/manifest.json` generation so each model row includes enough information to fetch the source `.mdx` and resolve texture paths.
 4. Runtime loader module(s):
    - `js/runtime/mdx_loader.js` (or equivalent) that converts parsed MDX data into Three.js objects.
    - `js/runtime/blp_loader.js` (or equivalent) that creates `THREE.Texture` from decoded BLP pixels.
 
 ## Architecture (High Level)
 ### A) Browser runtime flow
-1. Fetch `WarcraftModels/manifest.json`
+1. Fetch `models/manifest.json`
 2. When user selects a model in the UI:
    - fetch `.mdx` bytes from `WarcraftModels/<relative-mdx-path>.mdx`
    - decode MDX into structured model data (WASM output)

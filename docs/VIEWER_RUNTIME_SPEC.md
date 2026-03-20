@@ -1,6 +1,6 @@
 # Runtime Spec (`js/viewer.js`)
 
-This document specifies how the browser viewer loads `WarcraftModels/manifest.json`, loads a selected `models/<id>.glb`, centers/scales it, and plays the embedded glTF animation clips. It is aligned with `js/viewer.js` so a reimplementation or audit can rely on this file.
+This document specifies how the browser viewer loads `models/manifest.json`, loads a selected `models/<id>.glb`, centers/scales it, and plays the embedded glTF animation clips. It is aligned with `js/viewer.js` so a reimplementation or audit can rely on this file.
 
 ## Module imports
 - `three` (namespace `THREE`)
@@ -12,7 +12,7 @@ This document specifies how the browser viewer loads `WarcraftModels/manifest.js
 
 | Constant | Value | Purpose |
 | -------- | ----- | ------- |
-| `MANIFEST_URL` | `'WarcraftModels/manifest.json'` | Relative URL for `fetch()` |
+| `MANIFEST_URL` | `'models/manifest.json'` | Relative URL for `fetch()` |
 | `MDX_ANIM_BASE_SCALE` | `25` | Multiplies animation delta × speed slider; tunes perceived WC3-like speed |
 | `WC3_Z_UP_TO_Y_UP` | `-Math.PI / 2` | `rotateX` on loaded root to map MDX Z-up to Three.js Y-up |
 | `CAMERA_YAW_CORRECTION` | `Math.PI / 2` | Y-axis rotation on camera direction presets |
@@ -50,7 +50,7 @@ The runtime is responsible for:
 ## Manifest contract
 
 The viewer expects a JSON file at:
-- `WarcraftModels/manifest.json` (relative to the site root)
+- `models/manifest.json` (relative to the site root)
 
 Expected shape:
 - `{ "models": [ { id, name, category, path }, ... ] }`

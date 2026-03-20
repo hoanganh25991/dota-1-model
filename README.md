@@ -20,7 +20,7 @@ dota-1-model/
 ├── index.html              # Main viewer
 ├── css/styles.css          # Styling
 ├── js/viewer.js            # Three.js application
-├── models/                 # Converted GLB files
+├── models/                 # Converted GLB files + manifest.json
 ├── docs/
 │   ├── SPEC_INDEX.md       # Links to MDX→GLB and viewer specs
 │   ├── MDX_TO_GLB_SPEC.md  # Converter: MDX, BLP, animations → GLB
@@ -28,7 +28,6 @@ dota-1-model/
 ├── scripts/
 │   └── generate-model-manifest.mjs  # MDX to GLB converter
 ├── WarcraftModels/        # Source MDX files (3244 files)
-│   └── manifest.json      # Model list with categories
 └── README.md
 ```
 
@@ -36,7 +35,7 @@ dota-1-model/
 
 1. **Source**: MDX files in `WarcraftModels/` (do not edit)
 2. **Converted**: GLB files in `models/` (auto-generated)
-3. **Manifest**: `WarcraftModels/manifest.json` lists all available models
+3. **Manifest**: `models/manifest.json` lists all available models (generated next to the GLBs)
 
 ## Features
 

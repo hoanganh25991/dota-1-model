@@ -2,7 +2,7 @@
 /**
  * Scan WarcraftModels/ for *.mdx files
  * Convert each MDX to GLB for browser viewing (with BLP textures, UVs, skeleton, and animations)
- * Write manifest.json with model list
+ * Write manifest.json under models/ (alongside GLBs)
  */
 import fs from 'fs';
 import path from 'path';
@@ -696,7 +696,8 @@ async function main() {
 }
 
 function writeManifest(manifest) {
-  const outPath = path.join(WC3_MODELS, 'manifest.json');
+  fs.mkdirSync(MODELS_OUT, { recursive: true });
+  const outPath = path.join(MODELS_OUT, 'manifest.json');
   fs.writeFileSync(outPath, JSON.stringify({ models: manifest }, null, 2));
 }
 

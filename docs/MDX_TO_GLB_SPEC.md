@@ -1,6 +1,6 @@
 # MDX -> GLB Extraction Spec (`scripts/generate-model-manifest.mjs`)
 
-This document specifies how this repo converts **WARCRAFT III MDX** + **texture files on disk** into **GLB** files and `WarcraftModels/manifest.json`. It is meant to stay aligned with `scripts/generate-model-manifest.mjs` so nothing important is missed when reimplementing or auditing the pipeline.
+This document specifies how this repo converts **WARCRAFT III MDX** + **texture files on disk** into **GLB** files and `models/manifest.json`. It is meant to stay aligned with `scripts/generate-model-manifest.mjs` so nothing important is missed when reimplementing or auditing the pipeline.
 
 ## MDX vs BLP (and other textures): what you need when
 
@@ -21,7 +21,7 @@ The script is responsible for:
    3. Export skinning (vertex groups -> joints/weights)
    4. Export animation clips (MDX Sequences -> glTF animations)
    5. Export materials with texture conversion (BLP → PNG, or raw PNG/JPEG bytes → glTF textures)
-3. Writing `WarcraftModels/manifest.json` (model list + category + display names)
+3. Writing `models/manifest.json` (model list + category + display names)
 
 ## Entry points (CLI)
 
@@ -31,7 +31,7 @@ The script is responsible for:
 Behavior:
 - Recursively scans `WarcraftModels/` for `.mdx`
 - Converts each MDX to `models/<basename>.glb` unless the target GLB already exists
-- Writes `WarcraftModels/manifest.json`
+- Writes `models/manifest.json`
 
 ### Single-model conversion
 `node scripts/generate-model-manifest.mjs --only <id>`
@@ -66,7 +66,7 @@ For each MDX file:
 - `models/<basename>.glb`
 
 After a full scan:
-- `WarcraftModels/manifest.json`
+- `models/manifest.json`
   - `{ "models": [ { id, name, category, path }, ... ] }`
 
 ## Folder layout expectations
@@ -390,7 +390,7 @@ Skip optimization:
 - On failure: logs `Failed <basename>: <message>` to stderr; that model is **not** added to the manifest array for that run (entries already skipped due to existing GLB are still pushed).
 
 ### Empty `WarcraftModels/`
-- If the directory does not exist, it is created and an **empty** `manifest.json` is written (`{ "models": [] }`), then the script exits early.
+- If the directory does not exist, it is created and an **empty** `models/manifest.json` is written (`{ "models": [] }`), then the script exits early (`models/` is created if needed).
 
 ## MDX parse and GLB write
 
@@ -417,7 +417,7 @@ Skip optimization:
 | `buildSkinData` | Geoset → `JOINTS_0` / `WEIGHTS_0` |
 | `convertMdxToGlb` | Full MDX → glTF document → `.glb` |
 | `main` | CLI, scan, batch / `--only`, manifest |
-| `writeManifest` | `JSON.stringify` to `WarcraftModels/manifest.json` |
+| `writeManifest` | `JSON.stringify` to `models/manifest.json` |
 
 ## Related docs
 - Runtime (load GLB, camera, playback): [`VIEWER_RUNTIME_SPEC.md`](VIEWER_RUNTIME_SPEC.md)

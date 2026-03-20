@@ -1,6 +1,6 @@
 /**
  * WARCRAFT III Model Browser
- * Loads models from WarcraftModels/manifest.json
+ * Loads model list from models/manifest.json
  * Displays model list, supports search/category filter, plays real WC3 animations from GLB
  */
 import * as THREE from 'three';
@@ -8,7 +8,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-const MANIFEST_URL = 'WarcraftModels/manifest.json';
+const MANIFEST_URL = 'models/manifest.json';
 
 let scene, camera, renderer, controls;
 let modelGroup, groundGrid, currentModel, mixer, clock;
