@@ -77,7 +77,8 @@ function alignModelBottomToGround(root, groundY) {
 function isPortraitModelEntry(model) {
   if (!model) return false;
   if (model.category === 'Portrait') return true;
-  return /portrait/i.test(String(model.id || ''));
+  // Some models don't have reliable categories in the manifest; also fall back to id/name.
+  return /portrait/i.test(String(model.id || '')) || /portrait/i.test(String(model.name || ''));
 }
 
 /**
@@ -93,9 +94,40 @@ function hidePortraitEngineBackdrop(root) {
     if (!obj.geometry.boundingBox) obj.geometry.computeBoundingBox();
     const size = obj.geometry.boundingBox.getSize(new THREE.Vector3());
     const sorted = [size.x, size.y, size.z].sort((a, b) => a - b);
-    const thinCard = sorted[0] < 8 && sorted[1] > 30 && sorted[2] > 30;
-    const quad = pos.count === 4;
-    if (thinCard && quad) obj.visible = false;
+
+    // Strongly biased toward the portrait backdrop "card":
+    // - extremely thin (or very small thickness ratio)
+    // - large in the other 2 axes
+    // - low-vertex mesh (usually a single card made of 2 triangles)
+    // - not skinned (backdrop cards are static)
+    // - has a bound texture map (diffuse atlas)
+    const thickness = sorted[0];
+    const mid = sorted[1];
+    const large = sorted[2];
+    const thicknessRatio = thickness / Math.max(mid, large, 1e-6);
+
+    const name = String(obj.name || '').toLowerCase();
+    const isNamedBackplate = /portrait|backdrop|backplate/i.test(name);
+    const thinCard = thickness < 25 || thicknessRatio < 0.05;
+    const wideEnough = mid > 20 && large > 40;
+    const lowVertCount = pos.count <= 24;
+
+    const hasSkin =
+      Boolean(obj.geometry.attributes.skinIndex) || Boolean(obj.geometry.attributes.skinWeight);
+
+    const mats = obj.material ? (Array.isArray(obj.material) ? obj.material : [obj.material]) : [];
+    const materialHasTexture = mats.some((m) => m && m.map);
+
+    // If the mesh is explicitly named, hide it even if vertex/size thresholds drift.
+    if (isNamedBackplate) {
+      obj.visible = false;
+      return;
+    }
+
+    const extremelyThin = thicknessRatio < 0.01;
+    if (thinCard && wideEnough && lowVertCount && !hasSkin && (materialHasTexture || extremelyThin)) {
+      obj.visible = false;
+    }
   });
 }
 
@@ -591,6 +623,10 @@ function loadModel(id) {
         }
       });
       if (isPortraitModelEntry(model)) {
+        hidePortraitEngineBackdrop(currentModel);
+      } else {
+        // Also attempt to hide portrait-like cards even when the manifest category is wrong.
+        // This fixes the common "big textured square" artifact.
         hidePortraitEngineBackdrop(currentModel);
       }
       modelGroup.add(currentModel);
