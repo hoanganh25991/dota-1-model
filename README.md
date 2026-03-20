@@ -63,6 +63,8 @@ This will:
 2. Convert them to GLB in `models/` (skips MDX when `models/<name>.glb` already exists — delete a GLB to force reconvert). **Reconvert** after pipeline fixes (e.g. animation timing): animations use clip-relative times so Walk / Stand play correctly in Three.js.
 3. Update `manifest.json`
 
+If a model’s UI loads (animations listed) but the viewport stays **black**, the cached GLB may have been built with an older converter—especially **geoset visibility** (bad `GeosetAnim` sampling). Delete `models/<Name>.glb` and run the script again (use `--only <Name>` to rebuild one id).
+
 ## Model Names
 
 Names are formatted for readability:

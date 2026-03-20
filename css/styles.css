@@ -54,7 +54,7 @@ body {
     left: 300px;
     right: 280px;
     padding: 20px 30px;
-    background: linear-gradient(180deg, rgba(10,10,15,0.95) 0%, rgba(10,10,15,0) 100%);
+    background: linear-gradient(180deg, rgba(168,168,176,0.92) 0%, rgba(168,168,176,0) 100%);
     z-index: 100;
     pointer-events: none;
 }
@@ -232,6 +232,8 @@ body {
     left: 300px;
     right: 280px;
     bottom: 0;
+    /* Matches WebGL clear color (js/viewer.js VIEWER_BACKGROUND) for letterboxing / before first frame */
+    background: #a8a8b0;
 }
 
 #canvas {
@@ -354,7 +356,7 @@ input[type="range"] {
 
 #info p {
     font-size: 11px;
-    color: #444;
+    color: #4a4a52;
     letter-spacing: 2px;
     text-transform: uppercase;
 }

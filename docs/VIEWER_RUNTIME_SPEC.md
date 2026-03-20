@@ -98,7 +98,7 @@ On browser back/forward:
 ## Scene initialization (`init()`)
 
 Creates:
-- `scene = new THREE.Scene()` with `scene.background = new THREE.Color(0x0a0a0f)`
+- `scene = new THREE.Scene()` with `scene.background = new THREE.Color(0xa8a8b0)` (neutral grey for hero preview)
 - `camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000)` — initial aspect **1** until `resize()` runs
 - `camera.position.set(0, 2, 5)` (overwritten after successful `frameModelAndCamera` on load)
 - `renderer = new THREE.WebGLRenderer({ canvas: #canvas, antialias: true })`
@@ -151,12 +151,13 @@ On load:
 3. Traverse and material adjustments:
    - for each `obj.isMesh`:
      - `obj.frustumCulled = false`
-     - if `obj.material` exists:
-       - if array, use the first material `obj.material[0]`
-       - if `!m.transparent`:
-         - `m.side = THREE.DoubleSide`
-       - else:
-         - set `m.depthWrite = false`
+     - normalize `obj.material` to an array and iterate **every** slot
+     - for each material `m`:
+       - if `m.map` exists and `m.opacity <= 1e-5`: set `m.opacity = 1` (fixes glTF exports where
+         `baseColorFactor.a` is `0` but the diffuse map still defines appearance — otherwise Three.js
+         multiplies the texture down to fully transparent)
+       - if `!m.transparent`: `m.side = THREE.DoubleSide`
+       - else: `m.depthWrite = false`
 4. Add to scene container:
    - `modelGroup.add(currentModel)`
 
@@ -175,12 +176,20 @@ It then:
 - Syncs `#animation-select` value to `index` if present.
 - Sets `.active` on `#animation-buttons .animation-btn` where `data-index` matches.
 
-### Ensure frame 0 is evaluated before centering
+### Ensure visible geometry exists before centering
 Geoset visibility can be authored as scale 0/1 driven by geoset alpha animation channels.
-To center based on visible geometry, the viewer forces mixer evaluation at start:
-1. if `typeof mixer.setTime === 'function'`: `mixer.setTime(0)`
-2. `mixer.update(1e-4)`
-3. `currentModel.updateMatrixWorld(true)`
+Some GLBs keep every geoset at scale `0` until a few frames into the first clip; if the viewer
+only samples `t≈0`, the “visible mesh” AABB is empty and the fallback `Box3.setFromObject(root)`
+can center on hidden/collision geometry far from the real mesh (black viewport).
+
+After `playClipAtIndex` for clip `0`, the viewer calls `seekMixerForVisibleBounds(mixer, root)`:
+- Steps `t = 0, 1/30, 2/30, …` seconds up to `2s` (30 fps sampling).
+- At each step: `mixer.setTime(t)` (Three.js applies that absolute time), `root.updateMatrixWorld(true)`,
+  then probes `computeVisibleMeshesWorldBox`; stops at the first non-empty box.
+- If still empty after the scan: `mixer.setTime(0)` and frame using existing fallbacks.
+
+Models with **no** clips: `mixer.setTime(0)` if available, else `mixer.update(1e-4)`, then
+`currentModel.updateMatrixWorld(true)`.
 
 Then it calls:
 - `frameModelAndCamera(currentModel)`
@@ -209,7 +218,7 @@ Click behavior:
 Runs via `requestAnimationFrame(animate)`.
 
 Each frame:
-- `delta = clock.getDelta()`
+- `delta = min(clock.getDelta(), 0.1)` — caps huge deltas after tab backgrounding / debugger pauses
 - if `mixer` exists:
   - `mixer.update(delta * animationSpeed * MDX_ANIM_BASE_SCALE)`
 
@@ -222,6 +231,10 @@ After updating:
 - `renderer.render(scene, camera)`
 
 ## Centering and camera fitting (`frameModelAndCamera(root)`)
+
+**OrbitControls + damping:** While `enableDamping` is true, OrbitControls keeps internal `sphericalDelta` from user input. Assigning `camera.position` directly does **not** clear that; the next `controls.update()` adds the leftover delta to the recomputed orbit angles, which can move the camera inside the mesh or far off-screen (black viewport until a full reload). The viewer sets `controls.enableDamping = false` for the duration of framing, runs `controls.update()` (which zeros the delta when damping is off), then sets `enableDamping` back to `true`. `controls.maxDistance` is reset to `50` at the start of framing and then set to `max(50, dist * 4)`.
+
+`clearCurrentModel()` resets the camera to the initial `(0, 2, 5)` / target `(0,0,0)` with the same damping-off cycle so switching models does not inherit the previous orbit inertia.
 
 Purpose:
 - center the model around the origin
@@ -281,7 +294,7 @@ Computes vertical and horizontal FOV-based distances:
 
 Sets:
 - `modelFrameDistance = dist`
-- `controls.maxDistance = max(controls.maxDistance, dist * 4)`
+- `controls.maxDistance = max(50, dist * 4)` (baseline reset each frame)
 - direction:
   - base dir = `(0.52, 0.42, 0.74)` normalized
   - rotated around Y by `CAMERA_YAW_CORRECTION`

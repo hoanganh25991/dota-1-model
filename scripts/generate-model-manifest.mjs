@@ -130,16 +130,26 @@ function sampleGeosetAlphaAtFrame(geosetAnim, frame) {
   const keys = a.Keys;
   if (!keys || keys.length === 0) return 1;
   const sorted = [...keys].sort((x, y) => x.Frame - y.Frame);
+  const VIS_EPS = 0.02;
+  // Single key at global frame 0 with ~0 alpha: WC3 often stores a placeholder; treating it as
+  // real "hide forever" combined with `frame >= lastKey` made every frame > 0 invisible (Acolyte).
+  if (sorted.length === 1) {
+    const k = sorted[0];
+    if (k.Frame === 0 && k.Vector[0] <= VIS_EPS) return 1;
+  }
   if (frame < sorted[0].Frame) {
     const v0 = sorted[0].Vector[0];
     return v0 > 0.5 ? 0 : 1;
   }
-  if (frame >= sorted[sorted.length - 1].Frame) {
+  // Only clamp after the last key when there are multiple keys; a single key must fall through
+  // to interpolation/hold below (otherwise any frame >= 0 used the last key for all time).
+  if (sorted.length > 1 && frame > sorted[sorted.length - 1].Frame) {
     return sorted[sorted.length - 1].Vector[0];
   }
   let i = 0;
   while (i < sorted.length && sorted[i].Frame < frame) i++;
   if (i === 0) return sorted[0].Vector[0];
+  if (i === sorted.length) return sorted[sorted.length - 1].Vector[0];
   const k0 = sorted[i - 1];
   const k1 = sorted[i];
   const t = (frame - k0.Frame) / (k1.Frame - k0.Frame);
@@ -405,6 +415,9 @@ async function convertMdxToGlb(mdxPath, outPath, modelDir) {
     // If we couldn't resolve a real texture, hide the geometry instead of rendering
     // a white/opaque fallback.
     if (!tex) alphaClamped = 0;
+    // Layer alpha 0 with a resolved texture would export baseColorFactor.a = 0; viewers multiply
+    // texture by that factor and draw nothing. When a texture is present, treat 0 as "use texture".
+    else if (alphaClamped === 0) alphaClamped = 1;
     const pbr = doc.createMaterial().setBaseColorFactor([1, 1, 1, alphaClamped]);
     if (tex) pbr.setBaseColorTexture(tex);
     if (doubleSided) pbr.setDoubleSided(true);

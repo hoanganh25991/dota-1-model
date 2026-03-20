@@ -30,6 +30,9 @@ const MDX_ANIM_BASE_SCALE = 25;
  * WC3 MDX is Z-up, while glTF / Three.js is Y-up.
  * Rotate models so "up" lines up with the browser camera intuition.
  */
+/** Neutral grey backdrop so heroes read clearly vs pure black. */
+const VIEWER_BACKGROUND = 0xa8a8b0;
+
 const WC3_Z_UP_TO_Y_UP = -Math.PI / 2; // rotate around X
 
 /** Fixed yaw offset so the initial view looks at the model's "front". */
@@ -47,6 +50,9 @@ function rotateAroundY(x, z, yaw) {
 /** Last camera distance used for Front / Side presets */
 let modelFrameDistance = 8;
 
+const CONTROLS_MIN_DIST = 0.5;
+const CONTROLS_MAX_DIST_INIT = 50;
+
 /** Reused when reading world scale from matrix columns */
 const _mxCol0 = new THREE.Vector3();
 const _mxCol1 = new THREE.Vector3();
@@ -62,7 +68,7 @@ let lightPreset = 'default';
 
 function init() {
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0a0a0f);
+  scene.background = new THREE.Color(VIEWER_BACKGROUND);
 
   camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
   camera.position.set(0, 2, 5);
@@ -79,8 +85,8 @@ function init() {
   controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
-  controls.minDistance = 0.5;
-  controls.maxDistance = 50;
+  controls.minDistance = CONTROLS_MIN_DIST;
+  controls.maxDistance = CONTROLS_MAX_DIST_INIT;
   controls.target.set(0, 0, 0);
 
   modelGroup = new THREE.Group();
@@ -310,10 +316,38 @@ function computeVisibleMeshesWorldBox(root, targetBox) {
 }
 
 /**
+ * Some exports keep all geoset nodes at scale 0 until the first visibility key (e.g. a few
+ * frames into the clip). Framing at t≈0 then yields an empty "visible" AABB; falling back to
+ * `setFromObject` can center on hidden/collision geometry far from the real mesh → empty viewport.
+ * Step along the timeline until at least one mesh passes the visibility scale threshold.
+ */
+function seekMixerForVisibleBounds(mixer, root) {
+  if (!mixer || typeof mixer.setTime !== 'function') return;
+  const fps = 30;
+  const maxSec = 2;
+  const maxFrame = Math.ceil(maxSec * fps);
+  for (let f = 0; f <= maxFrame; f++) {
+    const t = f / fps;
+    // setTime() resets internal clocks and applies that absolute time (Three.js r160+).
+    mixer.setTime(t);
+    root.updateMatrixWorld(true);
+    const probe = new THREE.Box3();
+    computeVisibleMeshesWorldBox(root, probe);
+    if (!probe.isEmpty()) return;
+  }
+  mixer.setTime(0);
+  root.updateMatrixWorld(true);
+}
+
+/**
  * Fit `root` in view: center on origin, scale to target size, place camera (not top-down).
  * Call after mixer.update(0) so geoset visibility matches the first animation frame.
  */
 function frameModelAndCamera(root) {
+  controls.enableDamping = false;
+  controls.minDistance = CONTROLS_MIN_DIST;
+  controls.maxDistance = CONTROLS_MAX_DIST_INIT;
+
   const box = new THREE.Box3();
   computeVisibleMeshesWorldBox(root, box);
   if (box.isEmpty()) {
@@ -329,6 +363,7 @@ function frameModelAndCamera(root) {
     camera.far = 1000;
     camera.updateProjectionMatrix();
     controls.update();
+    controls.enableDamping = true;
     return;
   }
 
@@ -361,7 +396,7 @@ function frameModelAndCamera(root) {
   const distH = maxDim2 / 2 / Math.tan(hFov / 2);
   const dist = Math.max(distV, distH, 1.5) * 1.15;
   modelFrameDistance = dist;
-  controls.maxDistance = Math.max(controls.maxDistance, dist * 4);
+  controls.maxDistance = Math.max(CONTROLS_MAX_DIST_INIT, dist * 4);
 
   // Front-quarter (Y-up): mostly +Z toward model, moderate elevation — avoids “top-down” feel.
   const dir = new THREE.Vector3(0.52, 0.42, 0.74).normalize();
@@ -373,6 +408,7 @@ function frameModelAndCamera(root) {
   camera.far = Math.max(500, dist * 80);
   camera.updateProjectionMatrix();
   controls.update();
+  controls.enableDamping = true;
 }
 
 function getCategories() {
@@ -447,20 +483,23 @@ function loadModel(id) {
       // Align WC3 models' up-axis to Three.js' Y-up.
       currentModel.rotateX(WC3_Z_UP_TO_Y_UP);
       currentModel.traverse((obj) => {
-        if (obj.isMesh) {
-          obj.frustumCulled = false;
-          if (obj.material) {
-            const m = Array.isArray(obj.material) ? obj.material[0] : obj.material;
-            if (m) {
-              if (!m.transparent) {
-                // WC3 quads/geosets often rely on two-sided rendering.
-                m.side = THREE.DoubleSide;
-              } else {
-                // Avoid invisible transparent planes causing depth-fighting artifacts
-                // (common for portrait background quads that may be alpha=0).
-                m.depthWrite = false;
-              }
-            }
+        if (!obj.isMesh) return;
+        obj.frustumCulled = false;
+        const mats = obj.material ? (Array.isArray(obj.material) ? obj.material : [obj.material]) : [];
+        for (const m of mats) {
+          if (!m) continue;
+          // glTF `baseColorFactor` alpha can be 0 while `baseColorTexture` still carries the
+          // real albedo + cutout. Three.js multiplies map by `opacity` → mesh disappears entirely
+          // (seen on some units like Acolyte when MDX layer alpha is 0 but texture binds).
+          if (m.map && typeof m.opacity === 'number' && m.opacity <= 1e-5) {
+            m.opacity = 1;
+          }
+          if (!m.transparent) {
+            m.side = THREE.DoubleSide;
+          } else {
+            // Avoid invisible transparent planes causing depth-fighting artifacts
+            // (common for portrait background quads that may be alpha=0).
+            m.depthWrite = false;
           }
         }
       });
@@ -472,12 +511,12 @@ function loadModel(id) {
 
       if (currentClips.length > 0) {
         playClipAtIndex(currentClips, 0);
+        seekMixerForVisibleBounds(mixer, currentModel);
+      } else if (mixer) {
+        if (typeof mixer.setTime === 'function') mixer.setTime(0);
+        else mixer.update(1e-4);
+        currentModel.updateMatrixWorld(true);
       }
-      // Geoset hide/show + bones: must run before bounding box / centering
-      if (typeof mixer.setTime === 'function') mixer.setTime(0);
-      // Force the mixer to evaluate frame 0 channels (some rigs only apply on update()).
-      mixer.update(1e-4);
-      currentModel.updateMatrixWorld(true);
 
       frameModelAndCamera(currentModel);
       const viewSel = document.getElementById('view-select');
@@ -507,6 +546,21 @@ function clearCurrentModel() {
       }
     });
     currentModel = null;
+  }
+  // Clear OrbitControls damping accumulators so the next model is not affected by orbit inertia
+  // from the previous selection (fixes persistent black viewport when switching models).
+  if (controls && camera) {
+    controls.enableDamping = false;
+    controls.minDistance = CONTROLS_MIN_DIST;
+    controls.maxDistance = CONTROLS_MAX_DIST_INIT;
+    camera.position.set(0, 2, 5);
+    controls.target.set(0, 0, 0);
+    camera.near = 0.1;
+    camera.far = 1000;
+    camera.updateProjectionMatrix();
+    controls.update();
+    controls.enableDamping = true;
+    modelFrameDistance = 8;
   }
 }
 
@@ -551,7 +605,8 @@ function renderAnimationButtons(clips) {
 
 function animate() {
   requestAnimationFrame(animate);
-  const delta = clock.getDelta();
+  // Tab backgrounding / devtools pauses can yield multi-second deltas and explode mixer time.
+  const delta = Math.min(clock.getDelta(), 0.1);
   if (mixer) mixer.update(delta * animationSpeed * MDX_ANIM_BASE_SCALE);
   controls.update();
   renderer.render(scene, camera);
@@ -567,22 +622,26 @@ function applyViewPreset(preset) {
   }
 
   if (preset === 'front') {
+    controls.enableDamping = false;
     const baseX = 0;
     const baseZ = d * 0.92;
     const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
     camera.position.set(r.x, d * 0.38, r.z);
     controls.target.set(0, 0, 0);
     controls.update();
+    controls.enableDamping = true;
     return;
   }
 
   if (preset === 'side') {
+    controls.enableDamping = false;
     const baseX = d * 0.95;
     const baseZ = d * 0.12;
     const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
     camera.position.set(r.x, d * 0.35, r.z);
     controls.target.set(0, 0, 0);
     controls.update();
+    controls.enableDamping = true;
   }
 }
 

@@ -368,8 +368,10 @@ Visibility sampling:
   - if `geosetAnim.Alpha` is a number: return it
   - if it is keyframed:
     - keys are sorted by `Frame`
+    - **single key at global frame `0` with alpha ≤ `0.02`**: treated as a placeholder → return **1** (otherwise a lone key at `0` combined with `frame >= lastKey` made every later frame invisible, e.g. Acolyte)
     - before first key uses a “visibility based on >0.5” rule
     - between keys does linear interpolation
+    - **after last key**: only when **more than one** key exists; hold the last key’s value (single-key tails use the interpolation loop / hold above)
 
 ## Manifest writing
 
