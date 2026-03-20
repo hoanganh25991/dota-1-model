@@ -114,10 +114,11 @@ function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = true } = {}) {
     const name = String(obj.name || '').toLowerCase();
     const isNamedBackplate = /portrait|backdrop|backplate/i.test(name);
     // Plane-like: one axis is much thinner than the other two.
-    // Be conservative so we don't hide real geosets.
-    const extremelyThin = thicknessRatio < 0.05 || thickness < 25;
-    const wideEnough = mid > 10 && large > 10;
-    const veryLowVertCount = pos.count <= 800;
+    // Plane/backdrop-like card detection.
+    // Many WC3 "portrait cards" show up as very low-vertex meshes with a small bbox thickness.
+    const extremelyThin = thicknessRatio < 0.12 || thickness < 30;
+    const wideEnough = mid > 60 && large > 60;
+    const veryLowVertCount = pos.count <= 200;
 
     const mats = obj.material ? (Array.isArray(obj.material) ? obj.material : [obj.material]) : [];
     const materialHasTexture = mats.some((m) => m && m.map);
@@ -133,14 +134,14 @@ function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = true } = {}) {
     }
 
     const aspect = large / Math.max(thickness, 1e-6);
-    const extremeAspect = aspect > 60;
+    // Some cards have moderate aspect (e.g. 6–20), so don't require a huge aspect ratio.
+    const extremeAspect = aspect > 120;
 
     // Hide plane-like backdrop cards:
-    // - very large in 2 axes
-    // - very thin in 3rd axis (tiny thicknessRatio or huge aspect)
-    // - not extremely complex
+    // - very large in 2 axes (mid/large big)
+    // - very thin in 3rd axis
+    // - low vertex count (avoid nuking real geosets)
     // Texture isn't always bound (older exports), so allow either texture-map or extreme thinness.
-    // If it's skinned and unnamed, only hide when it's *very* card-like.
     const skinnedAllowed = allowSkinnedPlanes ? true : !hasSkin;
     const skinnedExtraGuard = !hasSkin || veryLowVertCount;
 
@@ -148,10 +149,9 @@ function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = true } = {}) {
       extremelyThin &&
       wideEnough &&
       veryLowVertCount &&
-      extremeAspect &&
       skinnedAllowed &&
       skinnedExtraGuard &&
-      (materialHasTexture || extremeAspect)
+      (materialHasTexture || extremelyThin)
     ) {
       if (DEBUG_HIDE_BACKDROP) {
         // eslint-disable-next-line no-console
@@ -497,7 +497,7 @@ function computeVisibleMeshesWorldBox(root, targetBox) {
 function seekMixerForVisibleBounds(mixer, root) {
   if (!mixer || typeof mixer.setTime !== 'function') return;
   const fps = 30;
-  const maxSec = 2;
+  const maxSec = 10;
   const maxFrame = Math.ceil(maxSec * fps);
   for (let f = 0; f <= maxFrame; f++) {
     const t = f / fps;
@@ -506,10 +506,11 @@ function seekMixerForVisibleBounds(mixer, root) {
     root.updateMatrixWorld(true);
     const probe = new THREE.Box3();
     computeVisibleMeshesWorldBox(root, probe);
-    if (!probe.isEmpty()) return;
+    if (!probe.isEmpty()) return t;
   }
   mixer.setTime(0);
   root.updateMatrixWorld(true);
+  return 0;
 }
 
 /**
@@ -694,7 +695,10 @@ function loadModel(id) {
 
       if (currentClips.length > 0) {
         playClipAtIndex(currentClips, 0);
-        seekMixerForVisibleBounds(mixer, currentModel);
+        const seekTime = seekMixerForVisibleBounds(mixer, currentModel);
+        // frameModelAndCamera uses the seeked mixer state to pick correct bounds.
+        // Later we may restore time to 0 depending on whether the model is visible.
+        currentModel.userData._seekTime = seekTime ?? 0;
       } else if (mixer) {
         if (typeof mixer.setTime === 'function') mixer.setTime(0);
         else mixer.update(1e-4);
@@ -702,6 +706,20 @@ function loadModel(id) {
       }
 
       frameModelAndCamera(currentModel);
+      // Some exports keep geoset nodes at scale 0 until the first visibility key.
+      // If we restored to t=0 unconditionally, the viewport can become empty (even grid).
+      // Restore to t=0 only if something is still visible; otherwise keep the seeked time.
+      if (mixer && typeof mixer.setTime === 'function') {
+        const tmpBox = new THREE.Box3();
+        const soughtT = currentModel.userData._seekTime ?? 0;
+        mixer.setTime(0);
+        currentModel.updateMatrixWorld(true);
+        computeVisibleMeshesWorldBox(currentModel, tmpBox);
+        if (tmpBox.isEmpty()) {
+          mixer.setTime(soughtT);
+          currentModel.updateMatrixWorld(true);
+        }
+      }
       const viewSel = document.getElementById('view-select');
       if (viewSel) viewSel.value = 'front';
       controls.saveState();

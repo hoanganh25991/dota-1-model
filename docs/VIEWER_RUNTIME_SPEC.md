@@ -162,7 +162,10 @@ On load:
          multiplies the texture down to fully transparent)
        - if `!m.transparent`: `m.side = THREE.DoubleSide`
        - else: `m.depthWrite = false`
-4. For **Portrait** models (`category === 'Portrait'` or id matches `/portrait/i`): `hidePortraitEngineBackdrop(currentModel)` — WC3 portrait MDX often has a **4-vertex** backdrop card (thin, huge bbox) used only by the in-game portrait compositor; it maps the full diffuse atlas and looks like a floating texture square in this viewer, so those meshes get `visible = false`.
+4. Backdrop-card hiding (portrait-like planes / quads):
+   - call `hidePortraitEngineBackdrop(currentModel, { allowSkinnedPlanes: true })` for loaded models
+   - it hides meshes that look like portrait/backdrop/background cards using a plane-like heuristic based on bounding-box shape (very small bbox thickness + large other axes + low vertex count), and also hides meshes whose name matches `/portrait|backdrop|backplate/i`
+   - this is applied to all models (not only manifest `category === 'Portrait'`) because some exported GLBs have the backdrop card even when categorization is inconsistent
 5. Add to scene container:
    - `modelGroup.add(currentModel)`
 
@@ -188,9 +191,10 @@ only samples `t≈0`, the “visible mesh” AABB is empty and the fallback `Box
 can center on hidden/collision geometry far from the real mesh (black viewport).
 
 After `playClipAtIndex` for clip `0`, the viewer calls `seekMixerForVisibleBounds(mixer, root)`:
-- Steps `t = 0, 1/30, 2/30, …` seconds up to `2s` (30 fps sampling).
+- Steps `t = 0, 1/30, 2/30, …` seconds up to `10s` (30 fps sampling).
 - At each step: `mixer.setTime(t)` (Three.js applies that absolute time), `root.updateMatrixWorld(true)`,
   then probes `computeVisibleMeshesWorldBox`; stops at the first non-empty box.
+- The returned “seek time” is stored (implementation: `currentModel.userData._seekTime`).
 - If still empty after the scan: `mixer.setTime(0)` and frame using existing fallbacks.
 
 Models with **no** clips: `mixer.setTime(0)` if available, else `mixer.update(1e-4)`, then
@@ -202,6 +206,11 @@ Then it calls:
 Post-framing:
 - If `#view-select` exists, sets value to `'front'`.
 - `controls.saveState()` — saved state is used by **Reset** (`applyViewPreset('reset')`).
+
+Mixer time restore (important for models that are fully hidden at `t=0`):
+- after `frameModelAndCamera`, the viewer temporarily tests `t=0`:
+  - it computes `computeVisibleMeshesWorldBox(currentModel, tmpBox)`
+  - if `tmpBox` is empty at `t=0`, it restores the previous seek time (`mixer.setTime(soughtT)`) so the model remains visible
 
 ### Animation UI integration (`renderAnimationButtons`)
 - If `clips.length === 0`:
