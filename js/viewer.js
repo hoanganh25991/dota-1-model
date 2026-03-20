@@ -11,7 +11,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 const MANIFEST_URL = 'WarcraftModels/manifest.json';
 
 let scene, camera, renderer, controls;
-let modelGroup, groundPlane, currentModel, mixer, clock;
+let modelGroup, groundGrid, currentModel, mixer, clock;
 /** @type {THREE.AnimationClip[]} Clips from the last loaded GLB (for button handlers) */
 let currentClips = [];
 let ambientLight, directionalLight;
@@ -33,51 +33,45 @@ const MDX_ANIM_BASE_SCALE = 25;
 /** Neutral grey backdrop so heroes read clearly vs pure black. */
 const VIEWER_BACKGROUND = 0xa8a8b0;
 
-/** Horizontal checkerboard floor (world Y); slightly below origin to limit z-fighting with feet. */
-const GROUND_Y = -0.02;
+/** Reference height (world Y) for the ground grid — lines only, no solid fill. */
+const GROUND_Y = 0;
+/** Small gap between mesh lowest point and grid so feet don’t z-fight with lines. */
+const GROUND_CLEARANCE = 0.02;
+/** Multiply auto-framing camera distance so the model is smaller in view with more margin (2 ≈ 2× zoom out). */
+const FRAMING_ZOOM_OUT = 2;
+/** Used before first load / after clear for Front–Side presets (`8` base × zoom-out). */
+const DEFAULT_MODEL_FRAME_DISTANCE = 8 * FRAMING_ZOOM_OUT;
+/** Lift orbit target along +Y (world) so the model sits lower in the frame (~bottom third). */
+const FRAMING_TARGET_Y_FACTOR = 0.32;
 
 /**
- * Infinite-feel floor: repeating checker texture on a large plane (XZ, Y-up).
+ * Line grid on XZ (no opaque plane) for spatial reference on the grey backdrop.
  */
-function createCheckerGround() {
-  const size = 128;
-  const cells = 8;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  const cell = size / cells;
-  const light = '#94949e';
-  const dark = '#6e6e7a';
-  for (let y = 0; y < cells; y++) {
-    for (let x = 0; x < cells; x++) {
-      ctx.fillStyle = (x + y) % 2 === 0 ? light : dark;
-      ctx.fillRect(x * cell, y * cell, cell + 0.5, cell + 0.5);
-    }
-  }
-  const map = new THREE.CanvasTexture(canvas);
-  map.wrapS = map.wrapT = THREE.RepeatWrapping;
-  map.colorSpace = THREE.SRGBColorSpace;
-  map.repeat.set(48, 48);
-  map.anisotropy = 8;
+function createGroundGrid() {
+  const size = 400;
+  const divisions = 80;
+  const colorCenter = 0x6a6a74;
+  const colorGrid = 0x8c8c96;
+  const grid = new THREE.GridHelper(size, divisions, colorCenter, colorGrid);
+  grid.position.y = GROUND_Y;
+  grid.name = 'GroundGrid';
+  grid.frustumCulled = false;
+  return grid;
+}
 
-  const geo = new THREE.PlaneGeometry(500, 500);
-  const mat = new THREE.MeshStandardMaterial({
-    map,
-    roughness: 0.92,
-    metalness: 0.05,
-    envMapIntensity: 0.35,
-    polygonOffset: true,
-    polygonOffsetFactor: 1,
-    polygonOffsetUnits: 1,
-  });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.rotation.x = -Math.PI / 2;
-  mesh.position.y = GROUND_Y;
-  mesh.receiveShadow = true;
-  mesh.name = 'CheckerGround';
-  mesh.frustumCulled = false;
-  return mesh;
+/**
+ * After centering/scaling, the AABB center is at the origin but feet can still sit below y=0.
+ * Shift the model up so the lowest visible point rests slightly above the ground grid.
+ */
+function alignModelBottomToGround(root, groundY) {
+  const box = new THREE.Box3();
+  computeVisibleMeshesWorldBox(root, box);
+  if (box.isEmpty()) return;
+  const minY = box.min.y;
+  const want = groundY + GROUND_CLEARANCE;
+  if (minY >= want) return;
+  root.position.y += want - minY;
+  root.updateMatrixWorld(true);
 }
 
 function isPortraitModelEntry(model) {
@@ -120,7 +114,9 @@ function rotateAroundY(x, z, yaw) {
 }
 
 /** Last camera distance used for Front / Side presets */
-let modelFrameDistance = 8;
+let modelFrameDistance = DEFAULT_MODEL_FRAME_DISTANCE;
+/** Orbit `controls.target.y` so Front/Side presets match auto-framing composition. */
+let framingTargetY = 0;
 
 const CONTROLS_MIN_DIST = 0.5;
 const CONTROLS_MAX_DIST_INIT = 50;
@@ -183,8 +179,8 @@ function init() {
   directionalLight.shadow.camera.far = 400;
   scene.add(directionalLight);
 
-  groundPlane = createCheckerGround();
-  scene.add(groundPlane);
+  groundGrid = createGroundGrid();
+  scene.add(groundGrid);
 
   const env = new RoomEnvironment();
   const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -440,8 +436,9 @@ function frameModelAndCamera(root) {
   if (box.isEmpty()) {
     root.position.set(0, 0, 0);
     root.scale.setScalar(1);
-    modelFrameDistance = 8;
-    camera.position.set(4.5, 3.2, 7.5);
+    modelFrameDistance = DEFAULT_MODEL_FRAME_DISTANCE;
+    framingTargetY = 0;
+    camera.position.set(4.5 * FRAMING_ZOOM_OUT, 3.2 * FRAMING_ZOOM_OUT, 7.5 * FRAMING_ZOOM_OUT);
     controls.target.set(0, 0, 0);
     camera.near = 0.1;
     camera.far = 1000;
@@ -468,6 +465,8 @@ function frameModelAndCamera(root) {
   root.position.sub(center2);
   root.updateMatrixWorld(true);
 
+  alignModelBottomToGround(root, GROUND_Y);
+
   const box3 = new THREE.Box3();
   computeVisibleMeshesWorldBox(root, box3);
   if (box3.isEmpty()) box3.setFromObject(root);
@@ -478,7 +477,7 @@ function frameModelAndCamera(root) {
   const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
   const distV = maxDim2 / 2 / Math.tan(vFov / 2);
   const distH = maxDim2 / 2 / Math.tan(hFov / 2);
-  const dist = Math.max(distV, distH, 1.5) * 1.15;
+  const dist = Math.max(distV, distH, 1.5) * 1.15 * FRAMING_ZOOM_OUT;
   modelFrameDistance = dist;
   controls.maxDistance = Math.max(CONTROLS_MAX_DIST_INIT, dist * 4);
 
@@ -486,8 +485,10 @@ function frameModelAndCamera(root) {
   const dir = new THREE.Vector3(0.52, 0.42, 0.74).normalize();
   // Align horizontal orientation with expected "front".
   dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), CAMERA_YAW_CORRECTION);
-  camera.position.copy(dir.multiplyScalar(dist));
-  controls.target.set(0, 0, 0);
+  // Raise look-at above model origin so the subject reads in the lower ~third of the viewport.
+  framingTargetY = size2.y * FRAMING_TARGET_Y_FACTOR;
+  controls.target.set(0, framingTargetY, 0);
+  camera.position.copy(controls.target).add(dir.clone().multiplyScalar(dist));
   camera.near = Math.max(0.01, dist * 0.002);
   camera.far = Math.max(500, dist * 80);
   camera.updateProjectionMatrix();
@@ -649,7 +650,8 @@ function clearCurrentModel() {
     camera.updateProjectionMatrix();
     controls.update();
     controls.enableDamping = true;
-    modelFrameDistance = 8;
+    modelFrameDistance = DEFAULT_MODEL_FRAME_DISTANCE;
+    framingTargetY = 0;
   }
 }
 
@@ -702,7 +704,7 @@ function animate() {
 }
 
 function applyViewPreset(preset) {
-  const d = modelFrameDistance || 8;
+  const d = modelFrameDistance || DEFAULT_MODEL_FRAME_DISTANCE;
   if (!controls) return;
 
   if (preset === 'reset') {
@@ -715,8 +717,9 @@ function applyViewPreset(preset) {
     const baseX = 0;
     const baseZ = d * 0.92;
     const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
-    camera.position.set(r.x, d * 0.38, r.z);
-    controls.target.set(0, 0, 0);
+    const ty = framingTargetY;
+    controls.target.set(0, ty, 0);
+    camera.position.set(r.x, ty + d * 0.38, r.z);
     controls.update();
     controls.enableDamping = true;
     return;
@@ -727,8 +730,9 @@ function applyViewPreset(preset) {
     const baseX = d * 0.95;
     const baseZ = d * 0.12;
     const r = rotateAroundY(baseX, baseZ, CAMERA_YAW_CORRECTION);
-    camera.position.set(r.x, d * 0.35, r.z);
-    controls.target.set(0, 0, 0);
+    const ty = framingTargetY;
+    controls.target.set(0, ty, 0);
+    camera.position.set(r.x, ty + d * 0.35, r.z);
     controls.update();
     controls.enableDamping = true;
   }

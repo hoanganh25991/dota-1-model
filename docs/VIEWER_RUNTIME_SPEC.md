@@ -31,7 +31,8 @@ Key variables used across functions:
 - `activeCategory` (starts `'all'`), `searchQuery` (starts `''`)
 - `animationSpeed` (starts `1`) — multiplied by `MDX_ANIM_BASE_SCALE` in `mixer.update`
 - `applyingUrlQuery` — when `true`, `writeUrlQuery` is a no-op (initial URL hydration, `syncFromUrl`)
-- `modelFrameDistance` — last computed camera distance for presets (default `8`)
+- `modelFrameDistance` — last computed camera distance for presets (default `8 × FRAMING_ZOOM_OUT`, i.e. `16` when zoom-out is `2`)
+- `framingTargetY` — last `controls.target.y` from framing (`size2.y * FRAMING_TARGET_Y_FACTOR`), so Front/Side match composition; `0` when cleared / no model
 - `lightPreset` — `'default'` | `'dark'` | `'bright'`
 
 ## High-level responsibilities
@@ -118,7 +119,8 @@ Lighting and environment:
 
 Scene graph:
 - `modelGroup = new THREE.Group()`, `scene.add(modelGroup)` — loaded GLB roots are parented here.
-- Checkerboard **ground plane** (`createCheckerGround()`): **500×500** `PlaneGeometry`, `MeshStandardMaterial` with a canvas **checker** texture (`RepeatWrapping` ×48), rotated **−90°** around X (lies in **XZ**), `position.y = GROUND_Y` (**−0.02**), `receiveShadow = true`. Not parented under `modelGroup` so it persists across model changes.
+- **Ground grid** (`createGroundGrid()`): `GridHelper` (**400** units, **80** divisions) — **lines only** on **XZ** at `GROUND_Y` (**0**), no opaque plane; subtle greys so it reads on the grey backdrop. Not parented under `modelGroup` so it persists across model changes.
+- After horizontal centering in `frameModelAndCamera`, `alignModelBottomToGround(root, GROUND_Y)` shifts `root.position.y` up so the lowest visible mesh point sits at `GROUND_Y + GROUND_CLEARANCE` (**0.02**), avoiding geometry sitting below the grid.
 
 `clock = new THREE.Clock()`.
 
@@ -152,7 +154,7 @@ On load:
 3. Traverse and material adjustments:
    - for each `obj.isMesh`:
      - `obj.frustumCulled = false`
-     - `obj.castShadow = true`, `obj.receiveShadow = true` (contact shadows on the checker floor)
+     - `obj.castShadow = true`, `obj.receiveShadow = true` (contact shadows on the ground grid)
      - normalize `obj.material` to an array and iterate **every** slot
      - for each material `m`:
        - if `m.map` exists and `m.opacity <= 1e-5`: set `m.opacity = 1` (fixes glTF exports where
@@ -292,7 +294,7 @@ Computes vertical and horizontal FOV-based distances:
 - uses `camera.fov`, `camera.aspect`
 - `vFov = camera.fov` in radians; `hFov = 2 * atan(tan(vFov/2) * aspect)`
 - `distV = (maxDim2/2) / tan(vFov/2)`, `distH = (maxDim2/2) / tan(hFov/2)`
-- `dist = max(distV, distH, 1.5) * 1.15`
+- `dist = max(distV, distH, 1.5) * 1.15 * FRAMING_ZOOM_OUT` (constant `FRAMING_ZOOM_OUT = 2` for ~2× zoom out / more empty space around the model)
 - `maxDim2 = max(size2.x, size2.y, size2.z, maxDim * scale, 0.001)` — keeps a floor from pre-scale size × scale
 
 Sets:
@@ -302,8 +304,9 @@ Sets:
   - base dir = `(0.52, 0.42, 0.74)` normalized
   - rotated around Y by `CAMERA_YAW_CORRECTION`
   - constant: `CAMERA_YAW_CORRECTION = Math.PI / 2`
-- `camera.position = dir * dist`
-- `controls.target = (0,0,0)`
+- `framingTargetY = size2.y * FRAMING_TARGET_Y_FACTOR` (default factor **0.32**) — raises the orbit target so the model sits in the **lower ~third** of the viewport
+- `controls.target = (0, framingTargetY, 0)`
+- `camera.position = controls.target + dir * dist`
 - `camera.near = max(0.01, dist * 0.002)`
 - `camera.far = max(500, dist * 80)`
 - `controls.update()`
@@ -314,12 +317,12 @@ Presets:
 - `reset`:
   - `controls.reset()`
 - `front`:
-  - uses `modelFrameDistance` and sets:
-    - camera position at moderately elevated front direction
-    - `controls.target = (0,0,0)`
+  - uses `modelFrameDistance` and `framingTargetY` from the last framing:
+    - `controls.target = (0, framingTargetY, 0)`
+    - camera position at moderately elevated front direction, **Y** = `framingTargetY + d * 0.38` (same offset structure as when target was origin)
   - uses helper `rotateAroundY` and `CAMERA_YAW_CORRECTION`
 - `side`:
-  - similar but near the side direction
+  - same target rule; camera **Y** = `framingTargetY + d * 0.35`
 
 UI elements call this on button clicks:
 - `#btn-reset` → `applyViewPreset('reset')`
