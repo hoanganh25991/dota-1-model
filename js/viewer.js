@@ -80,6 +80,31 @@ function createCheckerGround() {
   return mesh;
 }
 
+function isPortraitModelEntry(model) {
+  if (!model) return false;
+  if (model.category === 'Portrait') return true;
+  return /portrait/i.test(String(model.id || ''));
+}
+
+/**
+ * WC3 portrait MDX includes a camera-facing backdrop quad (4 verts, huge thin bbox) used by the
+ * in-game portrait compositor. In a generic viewer it draws as a full diffuse-atlas square behind
+ * the bust; hide it so only the head mesh remains visible.
+ */
+function hidePortraitEngineBackdrop(root) {
+  root.traverse((obj) => {
+    if (!obj.isMesh || !obj.geometry) return;
+    const pos = obj.geometry.attributes.position;
+    if (!pos) return;
+    if (!obj.geometry.boundingBox) obj.geometry.computeBoundingBox();
+    const size = obj.geometry.boundingBox.getSize(new THREE.Vector3());
+    const sorted = [size.x, size.y, size.z].sort((a, b) => a - b);
+    const thinCard = sorted[0] < 8 && sorted[1] > 30 && sorted[2] > 30;
+    const quad = pos.count === 4;
+    if (thinCard && quad) obj.visible = false;
+  });
+}
+
 const WC3_Z_UP_TO_Y_UP = -Math.PI / 2; // rotate around X
 
 /** Fixed yaw offset so the initial view looks at the model's "front". */
@@ -564,6 +589,9 @@ function loadModel(id) {
           }
         }
       });
+      if (isPortraitModelEntry(model)) {
+        hidePortraitEngineBackdrop(currentModel);
+      }
       modelGroup.add(currentModel);
 
       mixer = new THREE.AnimationMixer(currentModel);

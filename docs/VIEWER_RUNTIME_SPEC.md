@@ -160,7 +160,8 @@ On load:
          multiplies the texture down to fully transparent)
        - if `!m.transparent`: `m.side = THREE.DoubleSide`
        - else: `m.depthWrite = false`
-4. Add to scene container:
+4. For **Portrait** models (`category === 'Portrait'` or id matches `/portrait/i`): `hidePortraitEngineBackdrop(currentModel)` — WC3 portrait MDX often has a **4-vertex** backdrop card (thin, huge bbox) used only by the in-game portrait compositor; it maps the full diffuse atlas and looks like a floating texture square in this viewer, so those meshes get `visible = false`.
+5. Add to scene container:
    - `modelGroup.add(currentModel)`
 
 ### Mixer + clip discovery
