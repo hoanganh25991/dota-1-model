@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>Warcraft 3 Model Browser</title>
     <link rel="stylesheet" href="css/styles.css">
     <script type="importmap">
@@ -22,11 +22,11 @@
 
     <div id="header">
         <h1>
-            <span class="title-desktop">Warcraft 3 Model Browser</span>
+            <span class="title-desktop">WARCRAFT 3 MODEL BROWSER</span>
             <span class="title-mobile">
-                <span class="title-mobile-line1">Warcraft 3 Model</span>
+                <span class="title-mobile-line1">WARCRAFT 3 MODEL</span>
                 <br>
-                <span class="title-mobile-line2">Browser</span>
+                <span class="title-mobile-line2">BROWSER</span>
             </span>
         </h1>
         <p id="model-count">Loading...</p>
@@ -45,10 +45,13 @@
     </div>
 
     <div id="controls">
-        <div class="control-section">
-            <h3 id="current-model">Select a model</h3>
+        <div class="controls-header">
+            <div class="control-section">
+                <h3 id="current-model">Select a model</h3>
+            </div>
         </div>
 
+        <div class="controls-scroll">
         <div class="control-section">
             <h3>View</h3>
             <select id="view-select" aria-label="View preset">
@@ -90,6 +93,7 @@
                 <button id="btn-light-dark">Dark</button>
                 <button id="btn-light-bright">Bright</button>
             </div>
+        </div>
         </div>
     </div>
 

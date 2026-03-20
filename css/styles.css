@@ -57,15 +57,16 @@ body {
     background: linear-gradient(180deg, rgba(168,168,176,0.92) 0%, rgba(168,168,176,0) 100%);
     z-index: 100;
     pointer-events: none;
+    text-transform: uppercase;
 }
 
 #header h1 {
     font-size: 24px;
-    font-weight: 300;
+    font-weight: 700;
     letter-spacing: 4px;
     text-transform: uppercase;
     color: #00ff88;
-    text-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
+    text-shadow: 0 0 20px rgba(0, 255, 136, 0.45), 0 0 40px rgba(0, 255, 136, 0.2);
 }
 
 .title-desktop {
@@ -413,10 +414,15 @@ input[type="range"] {
     }
 }
 
+/* Mobile: vertical stack — header → search/filters → canvas → controls → hint (no fixed overlay). */
 @media (max-width: 768px) {
     body {
-        overflow: auto;
-        padding-bottom: 58vh; /* room for the fixed #controls panel */
+        overflow-x: hidden;
+        overflow-y: auto;
+        min-height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     }
 
     #header {
@@ -424,30 +430,37 @@ input[type="range"] {
         top: auto;
         left: auto;
         right: auto;
-        padding: 12px 14px 8px;
-        pointer-events: none;
+        flex: 0 0 auto;
+        padding: 14px 16px 10px;
+        padding-top: max(14px, env(safe-area-inset-top, 0px));
+        background: #0a0a0f;
+        pointer-events: auto;
         z-index: 10;
     }
 
     .title-desktop {
-        display: block;
-        white-space: nowrap;
-    }
-
-    .title-mobile {
         display: none;
     }
 
+    .title-mobile {
+        display: block;
+    }
+
     #header h1 {
-        font-size: 18px;
-        letter-spacing: 1.6px;
-        line-height: 1.1;
+        font-size: 17px;
+        font-weight: 700;
+        letter-spacing: 2px;
+        line-height: 1.2;
+        text-align: left;
+        text-shadow: 0 0 18px rgba(0, 255, 136, 0.5), 0 0 36px rgba(0, 255, 136, 0.25);
     }
 
     #sidebar {
         position: relative;
         width: 100%;
         height: auto;
+        flex: 0 0 auto;
+        max-height: none;
         border-right: none;
         border-bottom: 1px solid rgba(0, 255, 136, 0.2);
     }
@@ -458,31 +471,34 @@ input[type="range"] {
         right: auto;
         top: auto;
         bottom: auto;
-        height: 52vh;
-        min-height: 320px;
+        flex: 0 0 auto;
+        width: 100%;
+        height: min(48vh, 420px);
+        min-height: 260px;
+        border-bottom: 1px solid rgba(0, 255, 136, 0.15);
     }
 
     #controls {
-        position: fixed;
-        left: 0;
-        right: 0;
+        position: relative;
+        left: auto;
+        right: auto;
+        top: auto;
+        bottom: auto;
+        flex: 0 0 auto;
         width: 100%;
         height: auto;
-        top: auto;
-        bottom: 0;
-        overflow-y: auto;
-        max-height: 55vh;
-        padding: 16px 18px;
+        max-height: none;
+        overflow: visible;
+        padding: 16px 16px 20px;
         border-left: none;
-        border-top: 1px solid rgba(0, 255, 136, 0.2);
-        z-index: 250;
+        border-top: none;
+        z-index: 1;
     }
 
     #model-list {
         display: none;
     }
 
-    /* Replace button grids with native selects */
     #view-buttons,
     #lighting-buttons,
     #animation-buttons {
@@ -502,19 +518,69 @@ input[type="range"] {
         -webkit-appearance: menulist;
     }
 
-    /* Better info positioning for stacked layout */
     #info {
         position: relative;
         left: auto;
         transform: none;
         bottom: auto;
-        margin: 10px 0 0;
+        flex: 0 0 auto;
+        margin: 0 16px 12px;
+        padding-bottom: env(safe-area-inset-bottom, 0px);
         text-align: center;
+    }
+
+    #info p {
+        font-size: 10px;
+        line-height: 1.4;
+        color: #5a5a62;
     }
 }
 
-/* Landscape override: keep a horizontal, desktop-like layout so the right controls remain sticky. */
-@media (orientation: landscape) and (max-width: 900px) {
+@media (max-width: 768px) and (orientation: landscape) {
+    body {
+        padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
+    }
+
+    #header {
+        padding: 10px 14px 6px;
+        padding-top: max(10px, env(safe-area-inset-top, 0px));
+    }
+
+    #header h1 {
+        font-size: 15px;
+        letter-spacing: 1.5px;
+        line-height: 1.15;
+    }
+
+    .search-box {
+        padding: 10px 12px;
+    }
+
+    #category-filter {
+        padding: 8px 12px;
+    }
+
+    #viewer {
+        flex: 1 1 auto;
+        min-height: 200px;
+        height: 42vh;
+    }
+
+    #controls {
+        padding: 12px 14px 14px;
+    }
+
+    .control-section {
+        margin-bottom: 16px;
+    }
+
+    #info {
+        margin: 0 14px 10px;
+    }
+}
+
+/* Landscape on small tablets only: horizontal layout. Phones (≤768px) use the vertical rules above. */
+@media (orientation: landscape) and (max-width: 900px) and (min-width: 769px) {
     body {
         overflow: hidden;
     }
