@@ -1,3 +1,4 @@
 *
 !.gitignore
+!manifest.json
 !Abomination_Portrait.glb
