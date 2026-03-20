@@ -87,7 +87,7 @@ function isPortraitModelEntry(model) {
  * in-game portrait compositor. In a generic viewer it draws as a full diffuse-atlas square behind
  * the bust; hide it so only the head mesh remains visible.
  */
-function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = false } = {}) {
+function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = true } = {}) {
   const debugCandidates = [];
   root.traverse((obj) => {
     if (!obj.isMesh || !obj.geometry) return;
@@ -115,8 +115,8 @@ function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = false } = {}) {
     const isNamedBackplate = /portrait|backdrop|backplate/i.test(name);
     // Plane-like: one axis is much thinner than the other two.
     // Keep thresholds permissive enough to catch exports that triangulate the card densely.
-    const thinCard = thicknessRatio < 0.08 || thickness < 40;
-    const wideEnough = mid > 10 && large > 10;
+    const thinCard = thicknessRatio < 0.12 || thickness < 60;
+    const wideEnough = mid > 8 && large > 18;
     const lowVertCount = pos.count <= 10000;
 
     const mats = obj.material ? (Array.isArray(obj.material) ? obj.material : [obj.material]) : [];
@@ -677,14 +677,9 @@ function loadModel(id) {
           }
         }
       });
-      if (isPortraitModelEntry(model)) {
-        // Portraits sometimes tag the backdrop card as skinned even though it is static.
-        hidePortraitEngineBackdrop(currentModel, { allowSkinnedPlanes: true });
-      } else {
-        // Also attempt to hide portrait-like cards even when the manifest category is wrong.
-        // Keep this conservative to avoid removing real animated geometry.
-        hidePortraitEngineBackdrop(currentModel, { allowSkinnedPlanes: false });
-      }
+      // WC3 models sometimes include a giant portrait-like backdrop card/plane.
+      // It may be mis-tagged as skinned depending on the exporter, so we allow skinned planes.
+      hidePortraitEngineBackdrop(currentModel, { allowSkinnedPlanes: true });
       modelGroup.add(currentModel);
 
       mixer = new THREE.AnimationMixer(currentModel);
