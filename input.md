@@ -1,7 +1,7 @@
 # Requirements: Runtime MDX+BLP Renderer (WASM + Three.js)
 
 ## Goal
-Render Warcraft 3 MDX models with their referenced BLP textures **at runtime in the browser** (no GLB export / no GLTF conversion step), using:
+Render WARCRAFT III MDX models with their referenced BLP textures **at runtime in the browser** (no GLB export / no GLTF conversion step), using:
 - **WASM (Rust)** for MDX parsing and BLP decoding (performance + fewer binary parsing bugs)
 - **Three.js** for WebGL rendering, skinning, and animation playback
 

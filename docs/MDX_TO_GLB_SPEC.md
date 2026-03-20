@@ -1,6 +1,6 @@
 # MDX -> GLB Extraction Spec (`scripts/generate-model-manifest.mjs`)
 
-This document specifies how this repo converts **Warcraft 3 MDX** + **texture files on disk** into **GLB** files and `WarcraftModels/manifest.json`. It is meant to stay aligned with `scripts/generate-model-manifest.mjs` so nothing important is missed when reimplementing or auditing the pipeline.
+This document specifies how this repo converts **WARCRAFT III MDX** + **texture files on disk** into **GLB** files and `WarcraftModels/manifest.json`. It is meant to stay aligned with `scripts/generate-model-manifest.mjs` so nothing important is missed when reimplementing or auditing the pipeline.
 
 ## MDX vs BLP (and other textures): what you need when
 

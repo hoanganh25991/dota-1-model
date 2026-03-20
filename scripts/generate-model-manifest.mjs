@@ -16,7 +16,7 @@ const ROOT = path.resolve(__dirname, '..');
 const WC3_MODELS = path.join(ROOT, 'WarcraftModels');
 const MODELS_OUT = path.join(ROOT, 'models');
 
-const WC3_FPS = 30; // Warcraft 3 model animation frame rate
+const WC3_FPS = 30; // WARCRAFT III model animation frame rate
 /** MDX layer shading: TwoSided */
 const LAYER_TWO_SIDED = 16;
 /** If a texture has lots of transparent pixels, `OPAQUE` ignores its alpha and can cause artifacts. */

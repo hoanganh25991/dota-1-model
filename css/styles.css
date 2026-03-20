@@ -249,11 +249,34 @@ body {
     right: 0;
     width: 280px;
     height: 100vh;
+    height: 100dvh;
     background: rgba(10, 10, 15, 0.95);
     border-left: 1px solid rgba(0, 255, 136, 0.2);
     z-index: 200;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 0;
+}
+
+#controls .controls-header {
+    flex-shrink: 0;
+    padding: 20px 20px 14px;
+    border-bottom: 1px solid rgba(0, 255, 136, 0.12);
+    background: rgba(10, 10, 15, 0.98);
+}
+
+#controls .controls-header .control-section {
+    margin-bottom: 0;
+}
+
+#controls .controls-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
-    padding: 20px;
+    -webkit-overflow-scrolling: touch;
+    padding: 16px 20px 20px;
 }
 
 .control-section {
@@ -414,15 +437,19 @@ input[type="range"] {
     }
 }
 
-/* Mobile: vertical stack — header → search/filters → canvas → controls → hint (no fixed overlay). */
+/* Mobile: vertical stack — fills viewport; only .controls-scroll scrolls (not the page). */
 @media (max-width: 768px) {
+    html {
+        height: 100%;
+        overflow: hidden;
+    }
+
     body {
-        overflow-x: hidden;
-        overflow-y: auto;
-        min-height: 100dvh;
+        overflow: hidden;
+        height: 100dvh;
+        max-height: 100dvh;
         display: flex;
         flex-direction: column;
-        padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
     }
 
     #header {
@@ -484,15 +511,26 @@ input[type="range"] {
         right: auto;
         top: auto;
         bottom: auto;
-        flex: 0 0 auto;
+        flex: 1 1 auto;
+        min-height: 0;
         width: 100%;
         height: auto;
         max-height: none;
-        overflow: visible;
-        padding: 16px 16px 20px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding: 0;
         border-left: none;
-        border-top: none;
+        border-top: 1px solid rgba(0, 255, 136, 0.2);
         z-index: 1;
+    }
+
+    #controls .controls-header {
+        padding: 16px 16px 12px;
+    }
+
+    #controls .controls-scroll {
+        padding: 12px 16px 16px;
     }
 
     #model-list {
@@ -524,8 +562,8 @@ input[type="range"] {
         transform: none;
         bottom: auto;
         flex: 0 0 auto;
-        margin: 0 16px 12px;
-        padding-bottom: env(safe-area-inset-bottom, 0px);
+        margin: 0;
+        padding: 8px 16px max(12px, env(safe-area-inset-bottom, 0px));
         text-align: center;
     }
 
@@ -537,10 +575,6 @@ input[type="range"] {
 }
 
 @media (max-width: 768px) and (orientation: landscape) {
-    body {
-        padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
-    }
-
     #header {
         padding: 10px 14px 6px;
         padding-top: max(10px, env(safe-area-inset-top, 0px));
@@ -561,13 +595,18 @@ input[type="range"] {
     }
 
     #viewer {
-        flex: 1 1 auto;
+        flex: 0 0 auto;
         min-height: 200px;
         height: 42vh;
+        max-height: 48vh;
     }
 
-    #controls {
-        padding: 12px 14px 14px;
+    #controls .controls-header {
+        padding: 12px 14px 10px;
+    }
+
+    #controls .controls-scroll {
+        padding: 10px 14px 12px;
     }
 
     .control-section {
@@ -575,7 +614,7 @@ input[type="range"] {
     }
 
     #info {
-        margin: 0 14px 10px;
+        padding: 6px 14px max(10px, env(safe-area-inset-bottom, 0px));
     }
 }
 
@@ -624,12 +663,22 @@ input[type="range"] {
         bottom: 0;
         width: 240px;
         height: 100vh;
+        height: 100dvh;
         max-height: none;
-        overflow-y: auto;
-        overflow-x: hidden;
-        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding: 0;
         border-left: 1px solid rgba(0, 255, 136, 0.2);
         border-top: none;
         z-index: 250;
+    }
+
+    #controls .controls-header {
+        padding: 16px 16px 12px;
+    }
+
+    #controls .controls-scroll {
+        padding: 14px 16px 16px;
     }
 }

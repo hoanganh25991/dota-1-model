@@ -1,5 +1,5 @@
 /**
- * Warcraft 3 Model Browser
+ * WARCRAFT III Model Browser
  * Loads models from WarcraftModels/manifest.json
  * Displays model list, supports search/category filter, plays real WC3 animations from GLB
  */

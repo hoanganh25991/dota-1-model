@@ -1,6 +1,6 @@
-# Warcraft 3 Model Browser
+# WARCRAFT III Model Browser
 
-A Three.js browser for viewing Warcraft 3 MDX models.
+A Three.js browser for viewing WARCRAFT III MDX models.
 
 ## Quick Start
 
