@@ -114,10 +114,10 @@ function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = true } = {}) {
     const name = String(obj.name || '').toLowerCase();
     const isNamedBackplate = /portrait|backdrop|backplate/i.test(name);
     // Plane-like: one axis is much thinner than the other two.
-    // Keep thresholds permissive enough to catch exports that triangulate the card densely.
-    const thinCard = thicknessRatio < 0.12 || thickness < 60;
-    const wideEnough = mid > 8 && large > 18;
-    const lowVertCount = pos.count <= 10000;
+    // Be conservative so we don't hide real geosets.
+    const extremelyThin = thicknessRatio < 0.05 || thickness < 25;
+    const wideEnough = mid > 10 && large > 10;
+    const veryLowVertCount = pos.count <= 800;
 
     const mats = obj.material ? (Array.isArray(obj.material) ? obj.material : [obj.material]) : [];
     const materialHasTexture = mats.some((m) => m && m.map);
@@ -132,20 +132,26 @@ function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = true } = {}) {
       return;
     }
 
-    const extremelyThin = thicknessRatio < 0.02;
     const aspect = large / Math.max(thickness, 1e-6);
+    const extremeAspect = aspect > 60;
 
     // Hide plane-like backdrop cards:
     // - very large in 2 axes
     // - very thin in 3rd axis (tiny thicknessRatio or huge aspect)
     // - not extremely complex
     // Texture isn't always bound (older exports), so allow either texture-map or extreme thinness.
+    // If it's skinned and unnamed, only hide when it's *very* card-like.
+    const skinnedAllowed = allowSkinnedPlanes ? true : !hasSkin;
+    const skinnedExtraGuard = !hasSkin || veryLowVertCount;
+
     if (
-      thinCard &&
+      extremelyThin &&
       wideEnough &&
-      lowVertCount &&
-      (allowSkinnedPlanes || !hasSkin) &&
-      (materialHasTexture || extremelyThin || aspect > 80)
+      veryLowVertCount &&
+      extremeAspect &&
+      skinnedAllowed &&
+      skinnedExtraGuard &&
+      (materialHasTexture || extremeAspect)
     ) {
       if (DEBUG_HIDE_BACKDROP) {
         // eslint-disable-next-line no-console
@@ -154,7 +160,7 @@ function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = true } = {}) {
       obj.visible = false;
     } else if (DEBUG_HIDE_BACKDROP) {
       // Collect plane-likeness so we can tune thresholds.
-      if (thinCard && wideEnough) {
+      if (extremelyThin && wideEnough) {
         debugCandidates.push({
           name: obj.name,
           posCount: pos.count,
