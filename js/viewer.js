@@ -22,6 +22,7 @@ let searchQuery = '';
 let animationSpeed = 1;
 /** When true, skip updating the address bar (initial load / popstate sync). */
 let applyingUrlQuery = false;
+const DEBUG_HIDE_BACKDROP = new URLSearchParams(window.location.search).get('debugHideBackdrop') === '1';
 
 /** MDX timelines are long in wall-clock seconds; ~25× matches typical WC3 in-engine speed at slider 1×. */
 const MDX_ANIM_BASE_SCALE = 25;
@@ -86,7 +87,8 @@ function isPortraitModelEntry(model) {
  * in-game portrait compositor. In a generic viewer it draws as a full diffuse-atlas square behind
  * the bust; hide it so only the head mesh remains visible.
  */
-function hidePortraitEngineBackdrop(root) {
+function hidePortraitEngineBackdrop(root, { allowSkinnedPlanes = false } = {}) {
+  const debugCandidates = [];
   root.traverse((obj) => {
     if (!obj.isMesh || !obj.geometry) return;
     const pos = obj.geometry.attributes.position;
@@ -106,29 +108,82 @@ function hidePortraitEngineBackdrop(root) {
     const large = sorted[2];
     const thicknessRatio = thickness / Math.max(mid, large, 1e-6);
 
-    const name = String(obj.name || '').toLowerCase();
-    const isNamedBackplate = /portrait|backdrop|backplate/i.test(name);
-    const thinCard = thickness < 25 || thicknessRatio < 0.05;
-    const wideEnough = mid > 20 && large > 40;
-    const lowVertCount = pos.count <= 24;
-
     const hasSkin =
       Boolean(obj.geometry.attributes.skinIndex) || Boolean(obj.geometry.attributes.skinWeight);
+
+    const name = String(obj.name || '').toLowerCase();
+    const isNamedBackplate = /portrait|backdrop|backplate/i.test(name);
+    // Plane-like: one axis is much thinner than the other two.
+    // Keep thresholds permissive enough to catch exports that triangulate the card densely.
+    const thinCard = thicknessRatio < 0.08 || thickness < 40;
+    const wideEnough = mid > 10 && large > 10;
+    const lowVertCount = pos.count <= 10000;
 
     const mats = obj.material ? (Array.isArray(obj.material) ? obj.material : [obj.material]) : [];
     const materialHasTexture = mats.some((m) => m && m.map);
 
     // If the mesh is explicitly named, hide it even if vertex/size thresholds drift.
     if (isNamedBackplate) {
+      if (DEBUG_HIDE_BACKDROP) {
+        // eslint-disable-next-line no-console
+        console.log('[hideBackdrop] named', obj.name, { posCount: pos.count, size: { x: size.x, y: size.y, z: size.z } });
+      }
       obj.visible = false;
       return;
     }
 
-    const extremelyThin = thicknessRatio < 0.01;
-    if (thinCard && wideEnough && lowVertCount && !hasSkin && (materialHasTexture || extremelyThin)) {
+    const extremelyThin = thicknessRatio < 0.02;
+    const aspect = large / Math.max(thickness, 1e-6);
+
+    // Hide plane-like backdrop cards:
+    // - very large in 2 axes
+    // - very thin in 3rd axis (tiny thicknessRatio or huge aspect)
+    // - not extremely complex
+    // Texture isn't always bound (older exports), so allow either texture-map or extreme thinness.
+    if (
+      thinCard &&
+      wideEnough &&
+      lowVertCount &&
+      (allowSkinnedPlanes || !hasSkin) &&
+      (materialHasTexture || extremelyThin || aspect > 80)
+    ) {
+      if (DEBUG_HIDE_BACKDROP) {
+        // eslint-disable-next-line no-console
+        console.log('[hideBackdrop] plane', obj.name, { posCount: pos.count, size: { x: size.x, y: size.y, z: size.z }, thicknessRatio, aspect });
+      }
       obj.visible = false;
+    } else if (DEBUG_HIDE_BACKDROP) {
+      // Collect plane-likeness so we can tune thresholds.
+      if (thinCard && wideEnough) {
+        debugCandidates.push({
+          name: obj.name,
+          posCount: pos.count,
+          size: { x: size.x, y: size.y, z: size.z },
+          thicknessRatio,
+          aspect,
+          hasSkin,
+          materialHasTexture,
+        });
+      }
     }
   });
+
+  if (DEBUG_HIDE_BACKDROP) {
+    debugCandidates
+      .sort((a, b) => b.aspect - a.aspect)
+      .slice(0, 15)
+      .forEach((c) => {
+        // eslint-disable-next-line no-console
+        console.log('[hideBackdrop][candidate]', c.name, {
+          posCount: c.posCount,
+          size: c.size,
+          thicknessRatio: c.thicknessRatio,
+          aspect: c.aspect,
+          hasSkin: c.hasSkin,
+          materialHasTexture: c.materialHasTexture,
+        });
+      });
+  }
 }
 
 const WC3_Z_UP_TO_Y_UP = -Math.PI / 2; // rotate around X
@@ -623,11 +678,12 @@ function loadModel(id) {
         }
       });
       if (isPortraitModelEntry(model)) {
-        hidePortraitEngineBackdrop(currentModel);
+        // Portraits sometimes tag the backdrop card as skinned even though it is static.
+        hidePortraitEngineBackdrop(currentModel, { allowSkinnedPlanes: true });
       } else {
         // Also attempt to hide portrait-like cards even when the manifest category is wrong.
-        // This fixes the common "big textured square" artifact.
-        hidePortraitEngineBackdrop(currentModel);
+        // Keep this conservative to avoid removing real animated geometry.
+        hidePortraitEngineBackdrop(currentModel, { allowSkinnedPlanes: false });
       }
       modelGroup.add(currentModel);
 
